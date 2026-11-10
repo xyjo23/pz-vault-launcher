@@ -1,54 +1,54 @@
-# Project Zomboid Vault 0.2.0
+# Project Zomboid Vault
 
-第一轮桌面端重构：保留现有 `PZ-Freeze-Manager.ps1` 作为冻结与校验引擎，用 Electron + React 提供现代化控制台。真实对标 `PvzLauncher 1.5.1` 后的拆解与分期计划见 `REFERENCE_AUDIT.md`。
+面向 Windows 的 Project Zomboid Steam 原版与冻结版本管理器。项目从 `pz-version-mod-freezer` 的 PowerShell/WPF 原型演进而来，现在使用 Electron、React 和原生 Node 服务实现桌面工作流。
 
-## 已完成
+## 当前功能
 
-- 安全的 Electron 进程边界：渲染层无 Node 权限，所有系统操作经 preload IPC 白名单调用。
-- 选择并持久化 `PZ_Freeze_Manager` 目录，读取 `current-freeze.json`。
-- 启动冻结版、完整性校验、独立存档备份、日志目录打开。
-- 统一图标语言、状态层级、加载/反馈动画、减少动态效果系统适配。
-- 原创“隔离仓”应用标识与可继续扩展为 ICO/PNG 的 SVG 母版。
-- 自定义无边框窗口与适配 980×640 以上窗口的响应式布局。
+- 自动从注册表、`libraryfolders.vdf` 和 AppID `108600` 清单发现 Steam 原版。
+- 统一管理 Steam 原版与冻结版本，并持久化当前版本。
+- 控制台围绕当前版本提供启动、模组、存档、备份和日志入口。
+- 版本卡片与相对版本雷达；雷达支持悬停信息和双击切换。
+- 明确的“来源 → 迁移模式 → 名称与目标”冻结版本制作流程。
+- 从 Steam 或冻结版执行安全完整复制。
+- 从冻结版执行实验性 NTFS 硬链接复用，失败或跨卷时回退复制。
+- 生成 SHA-256 基线清单，并提供原生启动与完整性校验。
+- 迁移前可备份 Saves、数据库和根配置。
+- 兼容旧 PowerShell 版本生成的带 UTF-8 BOM 的 `freeze.json`。
 
-## 运行
+## 数据安全边界
+
+- Saves、配置、数据库和运行时缓存不会参与硬链接或共享。
+- Steam 原版禁止快速硬链接，避免 Steam 更新改变冻结内容。
+- 不以“成功启动三次”作为自动删除备份的依据。
+- 迁移失败时保留未完成目录用于诊断，不自动删除用户数据。
+
+## 开发
+
+需要 Node.js 22 与 pnpm 9：
 
 ```powershell
-pnpm install
+pnpm install --frozen-lockfile
+pnpm typecheck
 pnpm dev
 ```
 
-生成 Windows 安装版与便携版：
+构建 Windows installer 与 portable：
 
 ```powershell
 pnpm dist:win
 ```
 
-产物位于 `release/`。安装包允许选择安装目录；便携版不会写入安装信息。
+产物位于 `release/`。
 
-如需只检查视觉稿，可运行 `pnpm exec vite --config electron.vite.config.ts`；在普通浏览器环境中会自动加载只读模拟数据，Electron 内仍使用真实 IPC。
+## 当前边界
 
-首次运行后，选择已经由旧脚本创建的管理器目录。目录中应包含：
+- 共享包正式导入仍处于格式设计阶段。
+- 深度 MOD/版本兼容规则库尚未完成。
+- SHA-256 内容寻址共享仓库属于下一阶段。
+- Windows 包暂未配置商业代码签名证书，系统可能显示“未知发布者”。
 
-```text
-PZ_Freeze_Manager/
-  current-freeze.json
-  tools/PZ-Freeze-Manager.ps1
-  logs/
-  frozen/
-```
+## 来源与许可
 
-## 安全边界
+产品历史与旧版 PowerShell 实现位于 [xyjo23/pz-version-mod-freezer](https://github.com/xyjo23/pz-version-mod-freezer)。本项目不包含 Project Zomboid 游戏文件、Workshop MOD 或用户存档，也不隶属于 The Indie Stone、Valve 或 Steam。
 
-首轮没有重写冻结、哈希校验、备份算法，也没有复制用户数据。应用仅调用管理器目录内已经安装的 PowerShell 引擎；允许的动作固定为 `Launch`、`Verify`、`BackupSave`。
-
-## 后续迭代建议
-
-1. 把“首次创建冻结环境”拆成可暂停/恢复的任务，并加入磁盘空间与 Mod 预检向导。
-2. 将 PowerShell 的结构化输出升级为 JSON 事件流，替代当前的进程文本输出。
-3. 增加备份历史、恢复预览、校验报告详情页。
-4. 完成 Windows 安装包、应用图标与自动更新策略。
-
-## 设计借鉴与许可
-
-进程隔离与桌面应用结构参考了 `steam-update-freezer`（MIT）。本项目没有复制其业务实现或品牌素材；参考工程许可副本见 `THIRD_PARTY_LICENSES.md`。
+源代码使用 MIT License；第三方许可见 `THIRD_PARTY_LICENSES.md`。
