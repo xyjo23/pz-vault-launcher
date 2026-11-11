@@ -38,8 +38,8 @@ export const installBrowserPreviewApi = (): void => {
     openPath: async () => true,
     listVersions: async (): Promise<FreezeVersionSummary[]> => [
       { id: 'B42.12.3_build20489167', name: '长期生存主档', freezeRoot: previewSnapshot.config!.FreezeRoot, version: '42.12.3', buildId: '20489167', created: new Date().toISOString(), workshopProjectCount: 154, effectiveModCount: 287, isActive: true, isHealthy: true },
-      { id: 'B41.78.16_buildLegacy', name: '怀旧模组服', freezeRoot: 'D:\\PZ_Freeze_Manager\\frozen\\B41.78.16', version: '41.78.16', buildId: 'legacy', created: new Date(Date.now() - 86400000 * 30).toISOString(), workshopProjectCount: 128, effectiveModCount: 164, isActive: false, isHealthy: true },
-      { id: 'B42.10.0_challenge', name: '冬季挑战', freezeRoot: 'D:\\PZ_Freeze_Manager\\frozen\\B42.10.0', version: '42.10.0', buildId: '20311801', created: new Date(Date.now() - 86400000 * 12).toISOString(), workshopProjectCount: 141, effectiveModCount: 202, isActive: false, isHealthy: true }
+      { id: 'B41.78.16_buildLegacy', name: '怀旧模组服', freezeRoot: 'D:\\PZ_Freeze_Manager\\frozen\\B41.78.16', version: '41.78.16', buildId: 'legacy', created: new Date(Date.now() - 86400000 * 30).toISOString(), workshopProjectCount: 128, effectiveModCount: 164, isActive: false, isHealthy: false },
+      { id: 'B42.10.0_challenge', name: '极寒冬季长期生存挑战与大型模组兼容性测试专用版本名称', freezeRoot: 'D:\\PZ_Freeze_Manager\\frozen\\B42.10.0', version: '42.10.0', buildId: '20311801', created: new Date(Date.now() - 86400000 * 12).toISOString(), workshopProjectCount: 141, effectiveModCount: 202, isActive: false, isHealthy: true }
     ],
     activateVersion: async () => previewSnapshot,
     activateSteam: async () => ({ ...previewSnapshot, activeSource: 'Steam' }),

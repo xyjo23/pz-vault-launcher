@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.2-preview - 2026-11-11
+
+- Simplified Version Management into a user-selectable radar or single-column list view.
+- Removed explanatory blocks from the full radar and changed it to a centered square canvas.
+- Extended the radar sweep to the outer boundary.
+- Added a persistent Settings toggle for radar versus list mode.
+- Changed version cards to one version per row and moved Workshop, MOD and time metadata into hover details.
+- Made healthy cards open Version Details on click; unhealthy versions are grey and non-interactive.
+- Added 24-character version-name truncation with click-to-reveal and outside-click dismissal.
+- Made Version Details work for any selected Steam or frozen version, not only the active version.
+
 ## 0.6.1-preview - 2026-11-10
 
 - Fixed legacy frozen versions disappearing when `freeze.json` contains a UTF-8 BOM.

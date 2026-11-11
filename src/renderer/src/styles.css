@@ -77,7 +77,7 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .console-radar .radar-axis.horizontal i { width: 100%; }
 .console-radar .radar-axis.vertical { top: 8px; bottom: 8px; display: block; }
 .console-radar .radar-axis.vertical i { height: 100%; }
-.console-radar .radar-sweep { left: calc(50% - 112px); top: calc(50% - 112px); width: 224px; height: 224px; }
+.console-radar .radar-sweep { inset: auto; left: calc(50% - 112px); top: calc(50% - 112px); width: 224px; height: 224px; }
 .console-radar .radar-tooltip { left: auto; right: calc(100% + 9px); bottom: 50%; transform: translate(5px,50%); }
 .console-radar .radar-blip:hover .radar-tooltip, .console-radar .radar-blip:focus-visible .radar-tooltip { transform: translate(0,50%); }
 .console-radar-hint { margin-top: 8px; color: #68776e; font-size: 9px; letter-spacing: .06em; }
@@ -220,25 +220,25 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .version-summary { display: flex; align-items: center; gap: 19px; padding: 21px 24px; border: 1px solid rgba(168,230,63,.16); border-radius: 16px; background: linear-gradient(105deg, rgba(168,230,63,.075), rgba(15,22,19,.75)); }
 .version-summary h2 { margin: 7px 0 5px; font-size: 20px; }
 .version-summary p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
-.version-radar-panel { margin-top: 12px; padding: 20px 22px 22px; overflow: visible; border: 1px solid rgba(168,230,63,.14); border-radius: 16px; background: linear-gradient(145deg, rgba(13,23,18,.96), rgba(8,14,12,.98)); }
+.version-radar-panel { margin-top: 12px; display: grid; place-items: center; overflow: visible; }
 .radar-heading { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 16px; }
 .radar-heading h2 { margin: 6px 0 5px; font-size: 19px; }
 .radar-heading p { margin: 0; color: #9aa79f; font-size: 12px; }
 .radar-count { min-width: 84px; display: flex; flex-direction: column; align-items: center; padding: 9px 13px; border: 1px solid rgba(168,230,63,.15); border-radius: 11px; background: rgba(168,230,63,.045); }
 .radar-count b { color: var(--lime-bright); font-size: 21px; }
 .radar-count span { margin-top: 2px; color: #9ba89f; font-size: 9px; letter-spacing: .08em; }
-.version-radar { position: relative; height: 300px; overflow: visible; border: 1px solid rgba(168,230,63,.13); border-radius: 14px; background: radial-gradient(circle at center, rgba(168,230,63,.075), transparent 7%), repeating-radial-gradient(circle at center, transparent 0 48px, rgba(168,230,63,.055) 49px 50px), linear-gradient(rgba(168,230,63,.035) 1px, transparent 1px), linear-gradient(90deg, rgba(168,230,63,.035) 1px, transparent 1px), #09110d; background-size: auto, auto, 24px 24px, 24px 24px, auto; }
+.version-radar { position: relative; width: min(680px,100%); aspect-ratio: 1; overflow: visible; border: 1px solid rgba(168,230,63,.13); border-radius: 16px; background: radial-gradient(circle at center, rgba(168,230,63,.075), transparent 7%), repeating-radial-gradient(circle at center, transparent 0 12%, rgba(168,230,63,.055) 12.2% 12.5%), linear-gradient(rgba(168,230,63,.035) 1px, transparent 1px), linear-gradient(90deg, rgba(168,230,63,.035) 1px, transparent 1px), #09110d; background-size: auto, auto, 24px 24px, 24px 24px, auto; }
 .radar-grid-ring { position: absolute; left: 50%; top: 50%; border: 1px solid rgba(168,230,63,.11); border-radius: 50%; transform: translate(-50%,-50%); pointer-events: none; }
-.version-radar .ring-a { width: 92px; height: 92px; }
-.version-radar .ring-b { width: 188px; height: 188px; }
-.version-radar .ring-c { width: 284px; height: 284px; }
+.version-radar .ring-a { width: 28%; height: 28%; }
+.version-radar .ring-b { width: 58%; height: 58%; }
+.version-radar .ring-c { width: 88%; height: 88%; }
 .radar-axis { position: absolute; z-index: 1; color: #66756c; font-size: 9px; letter-spacing: .08em; pointer-events: none; }
 .radar-axis i { display: block; background: rgba(168,230,63,.13); }
 .radar-axis.horizontal { left: 18px; right: 18px; top: 50%; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; transform: translateY(-50%); }
 .radar-axis.horizontal i { height: 1px; }
 .radar-axis.vertical { top: 13px; bottom: 13px; left: 50%; display: grid; grid-template-rows: auto 1fr auto; justify-items: center; gap: 7px; transform: translateX(-50%); }
 .radar-axis.vertical i { width: 1px; height: 100%; }
-.radar-sweep { position: absolute; z-index: 2; left: calc(50% - 146px); top: calc(50% - 146px); width: 292px; height: 292px; border-radius: 50%; background: conic-gradient(from 0deg, transparent 0 320deg, rgba(168,230,63,.02) 335deg, rgba(168,230,63,.22) 359deg, transparent 360deg); animation: radar-sweep 5.8s linear infinite; pointer-events: none; }
+.radar-sweep { position: absolute; z-index: 2; inset: 0; width: 100%; height: 100%; border-radius: 50%; background: conic-gradient(from 0deg, transparent 0 320deg, rgba(168,230,63,.02) 335deg, rgba(168,230,63,.22) 359deg, transparent 360deg); animation: radar-sweep 5.8s linear infinite; pointer-events: none; }
 .radar-sweep::after { content: ''; position: absolute; left: 50%; top: 0; width: 1px; height: 50%; background: linear-gradient(var(--lime), transparent); transform-origin: 50% 100%; }
 @keyframes radar-sweep { to { transform: rotate(360deg); } }
 .radar-blip { position: absolute; z-index: 4; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 50%; background: transparent; transform: translate(-50%,-50%); cursor: crosshair; }
@@ -258,7 +258,7 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .radar-blip:hover { z-index: 9; }
 .radar-blip:hover .radar-tooltip, .radar-blip:focus-visible .radar-tooltip { opacity: 1; transform: translate(-50%,0); }
 .radar-no-versions { position: absolute; inset: 0; display: grid; place-items: center; color: #7f8d84; font-size: 12px; }
-.version-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; margin-top: 12px; }
+.version-grid { display: grid; grid-template-columns: 1fr; gap: 10px; margin-top: 12px; }
 .version-card { position: relative; min-height: 277px; display: flex; flex-direction: column; padding: 21px; overflow: hidden; border: 1px solid var(--border); border-radius: 15px; background: rgba(15,22,19,.76); transition: .2s; }
 .version-card:hover { transform: translateY(-2px); border-color: rgba(217,235,224,.2); background: rgba(18,27,23,.9); }
 .version-card.active { border-color: rgba(168,230,63,.25); background: linear-gradient(145deg, rgba(168,230,63,.085), rgba(15,22,19,.84) 58%); box-shadow: inset 3px 0 0 rgba(168,230,63,.78); }
@@ -278,10 +278,25 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .version-empty p { margin: 0; font-size: 13px; }
 .version-empty.compact { min-height: 250px; }
 .version-card.steam { border-color: rgba(89,163,212,.22); background: linear-gradient(145deg, rgba(65,133,179,.08), rgba(15,22,19,.82) 60%); }
-.version-card.unavailable { opacity: .72; }
+.version-card.unavailable { opacity: .42; filter: grayscale(.75); cursor: not-allowed; }
 .version-badge.steam { color: #79c8f1; border-color: rgba(89,174,220,.26); background: rgba(65,155,202,.09); }
 .version-card-actions { display: grid; grid-template-columns: 1.15fr .72fr .9fr; gap: 7px; margin-top: auto; }
 .version-card-actions .tool-action { padding: 0 8px; font-size: 12px; }
+.version-list-card { min-height: 92px; padding: 17px 19px; overflow: visible; cursor: pointer; }
+.version-list-card:hover:not(.unavailable) { transform: translateY(-1px); }
+.version-list-main { display: grid; grid-template-columns: 44px minmax(180px,1fr) minmax(230px,.9fr) 92px 16px; align-items: center; gap: 14px; width: 100%; }
+.version-identity { min-width: 0; }
+.version-name-wrap { position: relative; min-width: 0; }
+.version-name { max-width: 100%; min-height: auto; display: block; padding: 0; border: 0; color: #edf4f0; background: transparent; font-size: 18px; font-weight: 760; text-align: left; white-space: nowrap; }
+.version-name:is(button):hover { color: var(--lime-bright); }
+.version-name-full { position: absolute; z-index: 14; left: -10px; top: calc(100% + 9px); max-width: min(520px,70vw); padding: 10px 12px; border: 1px solid rgba(216,235,224,.18); border-radius: 9px; color: #f1f6f3; background: #101915; box-shadow: 0 16px 42px rgba(0,0,0,.42); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.version-identity .version-build { margin-top: 7px; }
+.version-hover-details { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 16px; opacity: 0; transform: translateX(6px); transition: .18s ease; }
+.version-list-card:hover .version-hover-details, .version-list-card:focus-visible .version-hover-details { opacity: 1; transform: translateX(0); }
+.version-hover-details span { min-width: 0; display: flex; flex-direction: column; gap: 4px; color: #849189; font-size: 9px; white-space: nowrap; }
+.version-hover-details b { overflow: hidden; color: #c9d4ce; font-size: 11px; font-weight: 650; text-overflow: ellipsis; }
+.version-list-card .tool-action { min-height: 38px; padding: 0 10px; margin: 0; font-size: 11px; }
+.version-open-icon { width: 15px; color: #65736b; }
 
 .steam-console-card { position: relative; min-height: 330px; display: grid; grid-template-columns: minmax(0,1.25fr) minmax(260px,.75fr); overflow: hidden; border: 1px solid rgba(92,174,220,.16); border-radius: 18px; background: linear-gradient(120deg, #111a17, #0d1717 64%, #0b1314); }
 .steam-console-card .hero-content { position: relative; z-index: 2; padding: 38px 34px; }

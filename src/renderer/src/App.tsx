@@ -34,13 +34,14 @@ import {
   Zap,
   X
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import type { ActionResult, FreezeVersionSummary, LauncherAction, LauncherSnapshot, MigrationMode, MigrationPreview, MigrationSourceType, SteamInstallation } from '../../shared/types'
 import { VaultMark } from './VaultMark'
 
 type Notice = { kind: 'success' | 'error'; text: string } | null
 type AppView = 'console' | 'versions' | 'maintenance' | 'help' | 'settings'
+type VersionDetailSelection = { kind: 'Steam' } | { kind: 'Frozen'; id: string }
 
 const actionPlans: Record<LauncherAction, string[]> = {
   Launch: ['读取并校验当前冻结配置', '绑定独立缓存与启动参数', '启动所选 Project Zomboid 版本'],
@@ -59,6 +60,26 @@ const formatDate = (value?: string | null): string => {
 
 const formatBytes = (value?: number): string => value ? `${(value / 1024 / 1024).toFixed(1)} MB` : '—'
 const compactPath = (value?: string | null): string => value || '尚未配置'
+const VERSION_NAME_LIMIT = 24
+
+const VersionName = ({ name }: { name: string }): React.JSX.Element => {
+  const [revealed, setRevealed] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const characters = Array.from(name)
+  const isLong = characters.length > VERSION_NAME_LIMIT
+  const shortened = isLong ? `${characters.slice(0, VERSION_NAME_LIMIT).join('')}...` : name
+
+  useEffect(() => {
+    if (!revealed) return
+    const close = (event: PointerEvent): void => {
+      if (!rootRef.current?.contains(event.target as Node)) setRevealed(false)
+    }
+    document.addEventListener('pointerdown', close)
+    return () => document.removeEventListener('pointerdown', close)
+  }, [revealed])
+
+  return <div className="version-name-wrap" ref={rootRef}>{isLong ? <button className="version-name" onClick={(event) => { event.stopPropagation(); setRevealed((value) => !value) }}>{shortened}</button> : <span className="version-name">{name}</span>}{revealed && isLong && <div className="version-name-full">{name}</div>}</div>
+}
 
 const versionScore = (value: string): number => {
   const parts = value.match(/\d+/g)?.slice(0, 3).map(Number) ?? [0]
@@ -85,9 +106,8 @@ const VersionRadar = ({ versions, steam, activeSource, onFrozenActivate, onSteam
   const maxTimeDelta = Math.max(1, ...items.map((item) => Math.abs((item.created ? new Date(item.created).getTime() : currentTime) - currentTime)))
   const maxVersionDelta = Math.max(1, ...items.map((item) => Math.abs(versionScore(item.version) - currentVersion)))
 
-  return <section className="version-radar-panel enter delay-2">
-    <div className="radar-heading"><div><span className="eyebrow">RELATIVE VERSION RADAR</span><h2>版本相对雷达</h2><p>中心为当前版本；横轴表示创建时间，纵轴表示游戏版本高低。双击光点可直接切换。</p></div><div className="radar-count"><b>{items.length}</b><span>已纳管版本</span></div></div>
-    <div className="version-radar" role="group" aria-label="版本相对雷达">
+  return <section className="version-radar-panel enter delay-1">
+    <div className="version-radar" role="group" aria-label="版本相对雷达，双击光点切换版本">
       <div className="radar-grid-ring ring-a" /><div className="radar-grid-ring ring-b" /><div className="radar-grid-ring ring-c" />
       <div className="radar-axis horizontal"><span>更早</span><i /><span>更新</span></div>
       <div className="radar-axis vertical"><span>高版本</span><i /><span>低版本</span></div>
@@ -142,9 +162,11 @@ export const App = (): React.JSX.Element => {
   const previewView = previewMode?.get('view')
   const [activeView, setActiveView] = useState<AppView>(['versions', 'maintenance', 'help', 'settings'].includes(previewView ?? '') ? previewView as AppView : 'console')
   const [isDrawerOpen, setDrawerOpen] = useState(previewMode?.get('drawer') === 'open')
+  const [detailSelection, setDetailSelection] = useState<VersionDetailSelection | null>(null)
   const [isTerminalOpen, setTerminalOpen] = useState(previewMode?.get('terminal') === 'open')
   const [isTerminalPinned, setTerminalPinned] = useState(false)
   const [showTerminal, setShowTerminal] = useState(() => previewMode?.get('terminal') === 'open' || window.localStorage.getItem('pz-vault-show-terminal') === 'true' || window.localStorage.getItem('pz-vault-show-recent-activity') === 'true')
+  const [showVersionRadar, setShowVersionRadar] = useState(() => previewMode?.get('versionView') !== 'list' && window.localStorage.getItem('pz-vault-version-view') !== 'list')
   const [steam, setSteam] = useState<SteamInstallation | null>(null)
   const [maintenanceSection, setMaintenanceSection] = useState<'version-control' | 'integrity' | 'share'>('version-control')
   const [migrationMode, setMigrationMode] = useState<MigrationMode>('SafeCopy')
@@ -173,6 +195,7 @@ export const App = (): React.JSX.Element => {
     const closeOnEscape = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') {
         setDrawerOpen(false)
+        setDetailSelection(null)
         setTerminalOpen(false)
         setTerminalPinned(false)
       }
@@ -242,6 +265,12 @@ export const App = (): React.JSX.Element => {
     window.localStorage.setItem('pz-vault-show-terminal', String(next))
   }
 
+  const toggleVersionRadar = (): void => {
+    const next = !showVersionRadar
+    setShowVersionRadar(next)
+    window.localStorage.setItem('pz-vault-version-view', next ? 'radar' : 'list')
+  }
+
   const updateSaveProtection = (enabled: boolean): void => {
     setSaveProtection(enabled)
     window.localStorage.setItem('pz-vault-save-protection', String(enabled))
@@ -285,7 +314,15 @@ export const App = (): React.JSX.Element => {
   }
 
   const openEnvironment = (): void => {
-    if (snapshot) setDrawerOpen(true)
+    if (!snapshot) return
+    setDetailSelection(snapshot.activeSource === 'Steam' ? { kind: 'Steam' } : activeVersion ? { kind: 'Frozen', id: activeVersion.id } : null)
+    setDrawerOpen(true)
+  }
+
+
+  const openVersionDetails = (selection: VersionDetailSelection): void => {
+    setDetailSelection(selection)
+    setDrawerOpen(true)
   }
 
   const status = useMemo(() => {
@@ -300,12 +337,18 @@ export const App = (): React.JSX.Element => {
   const activeVersion = versions.find((version) => version.isActive)
   const legacyVersionName = snapshot?.config?.FreezeRoot?.split(/[\\/]/).filter(Boolean).pop()
   const currentDisplayName = snapshot?.activeSource === 'Steam' ? 'Steam 原版' : activeVersion?.name ?? snapshot?.config?.DisplayName ?? legacyVersionName ?? '尚未选择版本'
-  const currentTechnicalVersion = snapshot?.activeSource === 'Steam' ? steam?.version : snapshot?.config?.Version
   const isSteamCurrent = snapshot?.activeSource === 'Steam'
-  const currentVersionHealthy = isSteamCurrent ? Boolean(steam?.detected) : Boolean(snapshot?.isHealthy)
+  const effectiveDetailSelection = detailSelection ?? (isSteamCurrent ? { kind: 'Steam' as const } : activeVersion ? { kind: 'Frozen' as const, id: activeVersion.id } : null)
+  const detailIsSteam = effectiveDetailSelection?.kind === 'Steam'
+  const detailFrozen = effectiveDetailSelection?.kind === 'Frozen' ? versions.find((version) => version.id === effectiveDetailSelection.id) : null
+  const detailIsCurrent = detailIsSteam ? isSteamCurrent : Boolean(detailFrozen?.isActive)
+  const detailHealthy = detailIsSteam ? Boolean(steam?.detected) : Boolean(detailFrozen?.isHealthy)
+  const detailName = detailIsSteam ? 'Steam 原版' : detailFrozen?.name ?? '版本未知'
+  const detailTechnicalVersion = detailIsSteam ? steam?.version : detailFrozen?.version
+  const detailBuildId = detailIsSteam ? steam?.buildId : detailFrozen?.buildId
+  const detailRoot = detailIsSteam ? steam?.gamePath : detailFrozen?.freezeRoot
   const openCurrentVersionPath = (): void => {
-    const target = isSteamCurrent ? steam?.gamePath : snapshot?.config?.FreezeRoot
-    if (target) void window.vault.openPath(target)
+    if (detailRoot) void window.vault.openPath(detailRoot)
   }
   const openVersionData = (kind: 'mods' | 'saves' | 'backups'): void => {
     const cachePath = isSteamCurrent ? steam?.cachePath : snapshot?.config?.CachePath
@@ -383,13 +426,11 @@ export const App = (): React.JSX.Element => {
           ) : activeView === 'versions' ? (
             <>
               <section className="page-heading enter"><div><span className="eyebrow">MANAGED BUILDS</span><h1>版本管理</h1><p>统一管理 Steam 原版与冻结版本，并选择控制台当前操作的版本。</p></div><button className="secondary-button" onClick={() => void chooseRoot()}><FolderCog />更换管理器目录</button></section>
-              <section className="version-summary enter delay-1"><div className="status-orb ready"><Boxes /></div><div><span className="eyebrow">VERSION LIBRARY</span><h2>当前版本 · {currentDisplayName}</h2><p>技术版本 {currentTechnicalVersion ?? '未知'}；当前共纳管 {(steam?.detected ? 1 : 0) + versions.length} 个版本。</p></div></section>
-              <VersionRadar versions={versions} steam={steam} activeSource={snapshot?.activeSource ?? 'Steam'} onFrozenActivate={(id) => void activateVersion(id)} onSteamActivate={() => void activateSteam()} />
-              <section className="version-grid enter delay-3">
-                <article className={`version-card steam ${steam?.detected ? '' : 'unavailable'} ${snapshot?.activeSource === 'Steam' ? 'active' : ''}`}><div className="version-card-top"><div className="version-badge steam">ST</div><div className="version-state">{snapshot?.activeSource === 'Steam' ? <><CheckCircle2 />当前版本</> : steam?.detected ? 'Steam 管理' : '未检测到'}</div></div><h3>Steam 原版</h3><div className="version-build">{steam?.detected ? `版本 ${steam.version} · Build ${steam.buildId}` : steam?.issue ?? '没有找到 AppID 108600'}</div><dl><div><dt>管理方式</dt><dd>Steam</dd></div><div><dt>Workshop</dt><dd>{steam?.workshopProjectCount ?? '—'}</dd></div><div><dt>状态</dt><dd>{steam?.detected ? '可用' : '不可用'}</dd></div></dl><div className="version-card-actions"><button className={`tool-action ${snapshot?.activeSource === 'Steam' ? '' : 'primary'}`} disabled={!steam?.detected || snapshot?.activeSource === 'Steam' || switchingId !== null} onClick={() => void activateSteam()}>{switchingId === 'steam-original' ? <LoaderCircle className="spin" /> : snapshot?.activeSource === 'Steam' ? <CheckCircle2 /> : <RefreshCw />}{snapshot?.activeSource === 'Steam' ? '正在使用' : '切换版本'}</button><button className="tool-action" disabled={!steam?.gamePath} onClick={() => { if (steam?.gamePath) void window.vault.openPath(steam.gamePath) }}><FolderOpen />目录</button><button className="tool-action" disabled={!steam?.detected} onClick={() => void window.vault.validateSteam()}><ClipboardCheck />校验</button></div></article>
-                {versions.map((version) => <article className={`version-card ${version.isActive ? 'active' : ''}`} key={version.id}><div className="version-card-top"><div className="version-badge">PZ</div><div className="version-state">{version.isActive ? <><CheckCircle2 />当前版本</> : version.isHealthy ? '冻结版本' : '文件不完整'}</div></div><h3>{version.name}</h3><div className="version-build">版本 {version.version} · Steam Build {version.buildId ?? '—'}</div><dl><div><dt>有效模组</dt><dd>{version.effectiveModCount ?? '—'}</dd></div><div><dt>Workshop</dt><dd>{version.workshopProjectCount ?? '—'}</dd></div><div><dt>冻结时间</dt><dd>{formatDate(version.created)}</dd></div></dl><button className={`tool-action ${version.isActive ? '' : 'primary'}`} disabled={version.isActive || !version.isHealthy || switchingId !== null} onClick={() => void activateVersion(version.id)}>{switchingId === version.id ? <LoaderCircle className="spin" /> : version.isActive ? <CheckCircle2 /> : <RefreshCw />}{version.isActive ? '正在使用' : '切换到此版本'}</button></article>)}
+              {showVersionRadar ? <VersionRadar versions={versions} steam={steam} activeSource={snapshot?.activeSource ?? 'Steam'} onFrozenActivate={(id) => void activateVersion(id)} onSteamActivate={() => void activateSteam()} /> : <section className="version-grid enter delay-1">
+                <article className={`version-card version-list-card steam ${steam?.detected ? '' : 'unavailable'} ${snapshot?.activeSource === 'Steam' ? 'active' : ''}`} role={steam?.detected ? 'button' : undefined} tabIndex={steam?.detected ? 0 : -1} aria-disabled={!steam?.detected} onClick={steam?.detected ? () => openVersionDetails({ kind: 'Steam' }) : undefined} onKeyDown={steam?.detected ? (event) => { if (event.key === 'Enter') openVersionDetails({ kind: 'Steam' }) } : undefined}><div className="version-list-main"><div className="version-badge steam">ST</div><div className="version-identity"><VersionName name="Steam 原版" /><div className="version-build">版本 {steam?.version ?? '未知'} · Build {steam?.buildId ?? '—'}</div></div><div className="version-hover-details"><span>Workshop <b>{steam?.workshopProjectCount ?? '—'}</b></span><span>更新时间 <b>{formatDate(steam?.installedAt)}</b></span><span>位置 <b>{steam?.libraryPath ? 'Steam 库' : '未识别'}</b></span></div><button className={`tool-action ${snapshot?.activeSource === 'Steam' ? '' : 'primary'}`} disabled={!steam?.detected || snapshot?.activeSource === 'Steam' || switchingId !== null} onClick={(event) => { event.stopPropagation(); void activateSteam() }}>{switchingId === 'steam-original' ? <LoaderCircle className="spin" /> : snapshot?.activeSource === 'Steam' ? <CheckCircle2 /> : <RefreshCw />}{snapshot?.activeSource === 'Steam' ? '当前' : '切换'}</button><ChevronRight className="version-open-icon" /></div></article>
+                {versions.map((version) => <article className={`version-card version-list-card ${version.isActive ? 'active' : ''} ${version.isHealthy ? '' : 'unavailable'}`} key={version.id} role={version.isHealthy ? 'button' : undefined} tabIndex={version.isHealthy ? 0 : -1} aria-disabled={!version.isHealthy} onClick={version.isHealthy ? () => openVersionDetails({ kind: 'Frozen', id: version.id }) : undefined} onKeyDown={version.isHealthy ? (event) => { if (event.key === 'Enter') openVersionDetails({ kind: 'Frozen', id: version.id }) } : undefined}><div className="version-list-main"><div className="version-badge">PZ</div><div className="version-identity"><VersionName name={version.name} /><div className="version-build">版本 {version.version} · Build {version.buildId ?? '—'}</div></div><div className="version-hover-details"><span>有效模组 <b>{version.effectiveModCount ?? '—'}</b></span><span>Workshop <b>{version.workshopProjectCount ?? '—'}</b></span><span>冻结时间 <b>{formatDate(version.created)}</b></span></div><button className={`tool-action ${version.isActive ? '' : 'primary'}`} disabled={version.isActive || !version.isHealthy || switchingId !== null} onClick={(event) => { event.stopPropagation(); void activateVersion(version.id) }}>{switchingId === version.id ? <LoaderCircle className="spin" /> : version.isActive ? <CheckCircle2 /> : <RefreshCw />}{version.isActive ? '当前' : '切换'}</button><ChevronRight className="version-open-icon" /></div></article>)}
                 {!versions.length && <div className="version-empty compact"><Boxes /><h2>还没有冻结版本</h2><p>进入“维护工具 → 版本控制”，从 Steam 原版创建第一个受管版本。</p><button className="primary-button" onClick={() => { setMaintenanceSection('version-control'); setActiveView('maintenance') }}><ArrowRight />开始版本控制</button></div>}
-              </section>
+              </section>}
             </>
           ) : activeView === 'maintenance' ? (
             <>
@@ -415,7 +456,7 @@ export const App = (): React.JSX.Element => {
           ) : (
             <>
               <section className="page-heading enter"><div><span className="eyebrow">LAUNCHER PREFERENCES</span><h1>设置</h1><p>调整控制台显示内容和启动器使用偏好。</p></div></section>
-              <section className="settings-panel enter delay-1"><div className="settings-heading"><div className="settings-icon"><SlidersHorizontal /></div><div><h2>界面模块</h2><p>选择启动器中需要显示的附加信息。</p></div></div><button className={`setting-row ${showTerminal ? 'enabled' : ''}`} onClick={toggleTerminal}><div><b>启用“终端”抽屉</b><span>开启后，左侧会出现二级悬浮入口；悬停预览，点击可固定终端。</span></div><span className="toggle" aria-hidden="true"><i /></span></button></section>
+              <section className="settings-panel enter delay-1"><div className="settings-heading"><div className="settings-icon"><SlidersHorizontal /></div><div><h2>界面模块</h2><p>选择启动器中需要显示的附加信息。</p></div></div><button className={`setting-row ${showVersionRadar ? 'enabled' : ''}`} onClick={toggleVersionRadar}><div><b>版本管理使用雷达</b><span>开启时显示相对版本雷达；关闭后改用单列版本清单。</span></div><span className="toggle" aria-hidden="true"><i /></span></button><button className={`setting-row ${showTerminal ? 'enabled' : ''}`} onClick={toggleTerminal}><div><b>启用“终端”抽屉</b><span>开启后，左侧会出现二级悬浮入口；悬停预览，点击可固定终端。</span></div><span className="toggle" aria-hidden="true"><i /></span></button></section>
               <section className="settings-panel enter delay-2"><div className="settings-heading"><div className="settings-icon amber"><Archive /></div><div><h2>存档保护</h2><p>控制版本迁移前是否额外保存可恢复的安全快照。</p></div></div><button className={`setting-row ${saveProtection ? 'enabled' : ''}`} onClick={() => updateSaveProtection(!saveProtection)}><div><b>迁移前创建存档安全快照</b><span>开启后，在复制或复用开始前备份 Saves、数据库与根配置。无论是否开启，可变数据都不会参与硬链接或共享。</span></div><span className="toggle" aria-hidden="true"><i /></span></button><div className="retention-note"><ShieldAlert /><span><b>不会在第三次启动后自动删除</b><small>“启动三次即删除”无法证明三次游戏均正常退出。当前版本保留快照，后续加入明确确认后再清理。</small></span></div></section>
               <section className="settings-panel compact enter delay-3"><div className="settings-heading"><div className="settings-icon"><ScrollText /></div><div><h2>操作日志</h2><p>查看创建、校验、启动和备份的历史日志文件。</p></div></div><button className="secondary-button" onClick={() => void window.vault.openLogs()}><FolderOpen />打开日志目录</button></section>
               <section className="settings-panel compact enter delay-3"><div className="settings-heading"><div className="settings-icon neutral"><ShieldCheck /></div><div><h2>版本管理目录</h2><p>当前目录：{snapshot?.managerRoot ?? '尚未配置'}</p></div></div><button className="secondary-button" onClick={() => void chooseRoot()}><FolderCog />重新选择管理器目录</button></section>
@@ -424,11 +465,11 @@ export const App = (): React.JSX.Element => {
         </main>
       </div>
 
-      <div className={`drawer-backdrop ${isDrawerOpen ? 'open' : ''}`} onMouseDown={(event) => { if (event.currentTarget === event.target) setDrawerOpen(false) }}>
+      <div className={`drawer-backdrop ${isDrawerOpen ? 'open' : ''}`} onMouseDown={(event) => { if (event.currentTarget === event.target) { setDrawerOpen(false); setDetailSelection(null) } }}>
         <aside className="environment-drawer" role="dialog" aria-modal="true" aria-label="版本详情">
-          <header className="drawer-header"><div><span className="eyebrow">VERSION DETAILS</span><h2>版本详情</h2></div><button className="icon-button" onClick={() => setDrawerOpen(false)} aria-label="关闭详情"><X /></button></header>
-          <div className="drawer-scroll"><div className={`drawer-health ${currentVersionHealthy ? 'healthy' : 'warning'}`}><ShieldCheck /><div><b>{currentVersionHealthy ? '版本检查通过' : '版本需要处理'}</b><span>{isSteamCurrent ? steam?.issue ?? 'Steam 原版、Workshop 与用户目录已识别。' : snapshot?.issue ?? '游戏、缓存和版本路径均可访问。'}</span></div></div><div className="drawer-version"><div className={`drawer-monogram ${isSteamCurrent ? 'steam' : ''}`}>{isSteamCurrent ? 'ST' : 'PZ'}</div><div><span>{isSteamCurrent ? 'STEAM MANAGED' : 'FROZEN BUILD'}</span><h3>{currentDisplayName}</h3><small>版本 {currentTechnicalVersion ?? '未知'} · Build {isSteamCurrent ? steam?.buildId ?? '—' : snapshot?.config?.BuildID ?? '—'}</small></div></div><section className="drawer-section"><h4>版本摘要</h4><dl><div><dt>有效模组</dt><dd>{isSteamCurrent ? '由 Steam 管理' : snapshot?.config?.EffectiveModCount ?? '—'}</dd></div><div><dt>Workshop 项目</dt><dd>{isSteamCurrent ? steam?.workshopProjectCount ?? '—' : snapshot?.config?.WorkshopProjectCount ?? '—'}</dd></div><div><dt>最近备份</dt><dd>{isSteamCurrent ? '用户目录' : formatDate(snapshot?.lastBackup?.createdAt)}</dd></div></dl></section><section className="drawer-section"><h4>文件位置</h4>{isSteamCurrent ? <><div className="path-item"><span>Steam 游戏</span><code>{compactPath(steam?.gamePath)}</code></div><div className="path-item"><span>Workshop</span><code>{compactPath(steam?.workshopPath)}</code></div><div className="path-item"><span>用户数据</span><code>{compactPath(steam?.cachePath)}</code></div></> : <><div className="path-item"><span>版本库</span><code>{compactPath(snapshot?.managerRoot)}</code></div><div className="path-item"><span>冻结游戏</span><code>{compactPath(snapshot?.config?.GamePath)}</code></div><div className="path-item"><span>独立缓存</span><code>{compactPath(snapshot?.config?.CachePath)}</code></div><div className="path-item"><span>备份目录</span><code>{compactPath(snapshot?.config?.BackupPath)}</code></div></>}</section></div>
-          <footer className="drawer-footer"><button className="secondary-button" disabled={!currentVersionHealthy} onClick={openCurrentVersionPath}><FolderOpen />打开版本目录</button><button className="launch-button compact" disabled={!currentVersionHealthy || isBusy} onClick={() => void perform('Launch')}><Play fill="currentColor" />启动当前版本</button></footer>
+          <header className="drawer-header"><div><span className="eyebrow">VERSION DETAILS</span><h2>版本详情</h2></div><button className="icon-button" onClick={() => { setDrawerOpen(false); setDetailSelection(null) }} aria-label="关闭详情"><X /></button></header>
+          <div className="drawer-scroll"><div className={`drawer-health ${detailHealthy ? 'healthy' : 'warning'}`}><ShieldCheck /><div><b>{detailHealthy ? '版本检查通过' : '版本不可用'}</b><span>{detailIsSteam ? steam?.issue ?? 'Steam 原版、Workshop 与用户目录已识别。' : detailHealthy ? '游戏、缓存和版本路径均可访问。' : '该冻结版本缺少必要的游戏或缓存目录。'}</span></div></div><div className="drawer-version"><div className={`drawer-monogram ${detailIsSteam ? 'steam' : ''}`}>{detailIsSteam ? 'ST' : 'PZ'}</div><div><span>{detailIsSteam ? 'STEAM MANAGED' : 'FROZEN BUILD'}</span><h3>{detailName}</h3><small>版本 {detailTechnicalVersion ?? '未知'} · Build {detailBuildId ?? '—'}</small></div></div><section className="drawer-section"><h4>版本摘要</h4><dl><div><dt>有效模组</dt><dd>{detailIsSteam ? '由 Steam 管理' : detailFrozen?.effectiveModCount ?? '—'}</dd></div><div><dt>Workshop 项目</dt><dd>{detailIsSteam ? steam?.workshopProjectCount ?? '—' : detailFrozen?.workshopProjectCount ?? '—'}</dd></div><div><dt>{detailIsSteam ? '清单更新' : '冻结时间'}</dt><dd>{formatDate(detailIsSteam ? steam?.installedAt : detailFrozen?.created)}</dd></div></dl></section><section className="drawer-section"><h4>文件位置</h4>{detailIsSteam ? <><div className="path-item"><span>Steam 游戏</span><code>{compactPath(steam?.gamePath)}</code></div><div className="path-item"><span>Workshop</span><code>{compactPath(steam?.workshopPath)}</code></div><div className="path-item"><span>用户数据</span><code>{compactPath(steam?.cachePath)}</code></div></> : <><div className="path-item"><span>版本目录</span><code>{compactPath(detailFrozen?.freezeRoot)}</code></div><div className="path-item"><span>冻结游戏</span><code>{compactPath(detailFrozen ? `${detailFrozen.freezeRoot}\\game` : null)}</code></div><div className="path-item"><span>独立缓存</span><code>{compactPath(detailFrozen ? `${detailFrozen.freezeRoot}\\cache` : null)}</code></div><div className="path-item"><span>备份目录</span><code>{compactPath(detailFrozen ? `${detailFrozen.freezeRoot}\\backups` : null)}</code></div></>}</section></div>
+          <footer className="drawer-footer"><button className="secondary-button" disabled={!detailHealthy} onClick={openCurrentVersionPath}><FolderOpen />打开版本目录</button><button className="launch-button compact" disabled={!detailHealthy || isBusy || switchingId !== null} onClick={() => { if (detailIsCurrent) void perform('Launch'); else if (detailIsSteam) void activateSteam(); else if (detailFrozen) void activateVersion(detailFrozen.id) }}>{detailIsCurrent ? <Play fill="currentColor" /> : <RefreshCw />}{detailIsCurrent ? '启动当前版本' : '切换到此版本'}</button></footer>
         </aside>
       </div>
       {showTerminal && <><button className={`terminal-float-button ${isTerminalOpen ? 'open' : ''} ${isTerminalPinned ? 'pinned' : ''}`} onMouseEnter={() => setTerminalOpen(true)} onClick={() => { setTerminalOpen(true); setTerminalPinned((value) => !value) }} aria-label="打开终端"><SquareTerminal /><span>终端</span></button><aside className={`terminal-drawer ${isTerminalOpen ? 'open' : ''}`} onMouseLeave={() => { if (!isTerminalPinned && !isBusy) setTerminalOpen(false) }} aria-label="操作终端"><header><div><span className="eyebrow">VAULT TERMINAL</span><h2>操作终端</h2></div><div className="terminal-header-actions"><button className={`icon-button ${isTerminalPinned ? 'active' : ''}`} onClick={() => setTerminalPinned((value) => !value)} aria-label={isTerminalPinned ? '取消固定终端' : '固定终端'}>{isTerminalPinned ? <PinOff /> : <Pin />}</button><button className="icon-button" onClick={() => { setTerminalOpen(false); setTerminalPinned(false) }} aria-label="关闭终端"><X /></button></div></header><div className="terminal-body"><div className="terminal-status"><span className={`terminal-dot ${isBusy ? 'running' : lastResult?.ok === false ? 'error' : ''}`} /><div><b>{isBusy ? '正在执行' : lastResult ? '操作已结束' : '终端待命'}</b><small>{terminalAction ?? '等待选择操作'}</small></div></div><div className="terminal-screen"><div className="terminal-command"><span className="prompt">pz-vault&gt;</span> {terminalAction ? terminalAction.toLowerCase() : 'idle'}</div>{terminalAction ? <>{terminalPlan.map((step, index) => <div className="terminal-plan" key={step}><span>[PLAN {String(index + 1).padStart(2, '0')}]</span>{step}</div>)}{isBusy && <div className="terminal-running"><span>[RUNNING]</span>PowerShell 引擎正在执行，请等待返回结果……</div>}{lastResult && <><div className={lastResult.ok ? 'terminal-complete' : 'terminal-error'}><span>[{lastResult.ok ? 'DONE' : 'ERROR'}]</span>{lastResult.message} · {formatDate(lastResult.finishedAt)}</div><pre>{lastResult.output || '操作完成，没有额外输出。'}</pre></>}</> : <div className="terminal-idle">[IDLE] 请选择启动、校验或备份操作。</div>}</div></div><footer><button className="secondary-button" onClick={() => void refresh()}><RefreshCw />刷新环境</button><button className="secondary-button" onClick={() => setActiveView('settings')}><Settings2 />终端设置</button></footer></aside></>}
