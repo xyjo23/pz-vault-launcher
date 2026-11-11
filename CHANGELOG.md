@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.3-preview - 2026-11-11
+
+- Fixed long current-version names overflowing into the console radar at non-maximized window sizes.
+- Made the current-version name use the same click-to-reveal behavior as version-list names.
+- Removed the duplicate MOD list, backup and operation-log shortcuts from the bottom of the console.
+- Changed the Effective Mods metric into an in-app drawer instead of opening a system folder.
+- Added native scanning of Steam and frozen MOD directories with human-readable names parsed from `mod.info`.
+- Kept Workshop IDs and MOD IDs as secondary metadata in the MOD drawer.
+- Renamed Recent Backup to Backup Information and transferred the backup-folder action to that metric card.
+
 ## 0.6.2-preview - 2026-11-11
 
 - Simplified Version Management into a user-selectable radar or single-column list view.
