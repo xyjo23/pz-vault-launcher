@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.0-preview - 2026-11-20
+
+- Replaced cached text version detection with binary identity parsing for B42 version, revision and `Core.jar` SHA-256 evidence.
+- Added the B42 MOD layout resolver, Workshop/Mod ID database, dependency graph, missing/circular dependency checks and semantic file-overlap analysis.
+- Added save and server configuration comparison with blocker, warning, unknown and pass evidence levels.
+- Added Quick Thin Versions: reuse an immutable frozen game, independently copy mutable cache data and materialize active MODs with NTFS hard links.
+- Added ASCII technical directory IDs while preserving Unicode display names, avoiding Project Zomboid `-cachedir` path corruption.
+- Added base-version, missing-reference and wrong-hard-link health checks, plus early launch survival verification with PID evidence.
+- Added cross-volume copy fallback estimates and explicit blocking for obsolete junction-based or non-ASCII thin versions.
+- Added repeatable migration and destructive regression harnesses covering dependency loss, wrong links, cache isolation and repeated launches.
+- Verified the final profile against Project Zomboid 42.22.2 in the real game UI, including a populated in-game MOD list.
+
 ## 0.6.3-preview - 2026-11-11
 
 - Fixed long current-version names overflowing into the console radar at non-maximized window sizes.

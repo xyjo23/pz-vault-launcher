@@ -36,7 +36,7 @@ import {
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import type { ActionResult, FreezeVersionSummary, LauncherAction, LauncherSnapshot, MigrationMode, MigrationPreview, MigrationSourceType, ModSummary, SteamInstallation } from '../../shared/types'
+import type { ActionResult, CompatibilityReport, CompatibilitySeverity, FreezeVersionSummary, LauncherAction, LauncherSnapshot, MigrationMode, MigrationPreview, MigrationSourceType, ModSummary, SteamInstallation } from '../../shared/types'
 import { VaultMark } from './VaultMark'
 
 type Notice = { kind: 'success' | 'error'; text: string } | null
@@ -58,7 +58,11 @@ const formatDate = (value?: string | null): string => {
   }).format(new Date(value))
 }
 
-const formatBytes = (value?: number): string => value ? `${(value / 1024 / 1024).toFixed(1)} MB` : '—'
+const formatBytes = (value?: number): string => {
+  if (!value) return '—'
+  if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(2)} GiB`
+  return `${(value / 1024 ** 2).toFixed(1)} MiB`
+}
 const compactPath = (value?: string | null): string => value || '尚未配置'
 const VERSION_NAME_LIMIT = 24
 
@@ -151,6 +155,42 @@ const ConsoleVersionRadar = ({ versions, steam, activeSource, onFrozenActivate, 
   })}</div><small className="console-radar-hint">悬停识别 · 双击切换</small></div>
 }
 
+const compatibilityLabels: Record<CompatibilitySeverity, string> = {
+  blocker: '阻断',
+  warning: '警告',
+  unknown: '待验证',
+  pass: '通过'
+}
+
+const CompatibilityResults = ({ report }: { report: CompatibilityReport }): React.JSX.Element => (
+  <section className="compatibility-report enter">
+    <div className="compatibility-report-header">
+      <div><span className="eyebrow">COMPATIBILITY REPORT</span><h2>{report.sourceLabel}</h2><p>生成于 {formatDate(report.generatedAt)} · 报告已保存到 {report.reportPath ?? '应用数据目录'}</p></div>
+      <div className={`compatibility-verdict ${report.verdict}`}><span />{compatibilityLabels[report.verdict]}</div>
+    </div>
+    <div className="compatibility-stats">
+      <div><span>已安装 MOD</span><b>{report.summary.installedMods}</b><small>激活 {report.summary.activeMods}</small></div>
+      <div className="danger"><span>阻断</span><b>{report.summary.blockers}</b><small>必须处理</small></div>
+      <div className="warning"><span>警告</span><b>{report.summary.warnings}</b><small>建议检查</small></div>
+      <div className="unknown"><span>待验证</span><b>{report.summary.unknowns}</b><small>需要语义分析</small></div>
+      <div><span>路径重叠</span><b>{report.summary.overlapPaths}</b><small>覆盖原版 {report.summary.baseGameOverrides}</small></div>
+    </div>
+    <div className="identity-evidence">
+      <ShieldCheck /><div><b>{report.identity.version} · Build {report.identity.buildId}</b><span>revision {report.identity.revision ?? '未知'} · {report.identity.status === 'stale-cache' ? '运行缓存已过期，以二进制为准' : '二进制身份已解析'}</span></div>
+    </div>
+    <div className="compatibility-columns">
+      <div className="compatibility-issues">
+        <div className="report-section-title"><h3>规则结果</h3><span>{report.issues.length} 项</span></div>
+        {report.issues.map((entry) => <article className={`compatibility-issue ${entry.severity}`} key={entry.id}><div className="issue-severity">{compatibilityLabels[entry.severity]}</div><div><b>{entry.title}</b><p>{entry.summary}</p>{entry.evidence.length > 0 && <code>{entry.evidence.slice(0, 3).join(' · ')}</code>}</div></article>)}
+      </div>
+      <div className="overlap-evidence">
+        <div className="report-section-title"><h3>文件覆盖证据</h3><span>显示 {report.overlaps.length}/{report.summary.overlapPaths}</span></div>
+        {report.overlaps.length ? report.overlaps.slice(0, 40).map((overlap) => <article key={`${overlap.classification}:${overlap.relativePath}`}><div><span className={`overlap-kind ${overlap.severity}`}>{overlap.classification}</span>{overlap.overridesBaseGame && <span className="base-override">覆盖原版</span>}</div><code>{overlap.relativePath}</code><small>{overlap.modIds.join(' · ')}</small></article>) : <div className="report-empty"><CheckCircle2 />没有需要展示的同路径覆盖</div>}
+      </div>
+    </div>
+  </section>
+)
+
 export const App = (): React.JSX.Element => {
   const [snapshot, setSnapshot] = useState<LauncherSnapshot | null>(null)
   const [versions, setVersions] = useState<FreezeVersionSummary[]>([])
@@ -166,6 +206,8 @@ export const App = (): React.JSX.Element => {
   const [isModsDrawerOpen, setModsDrawerOpen] = useState(previewMode?.get('mods') === 'open')
   const [currentMods, setCurrentMods] = useState<ModSummary[]>([])
   const [modsLoading, setModsLoading] = useState(false)
+  const [compatibilityReport, setCompatibilityReport] = useState<CompatibilityReport | null>(null)
+  const [compatibilityLoading, setCompatibilityLoading] = useState(false)
   const [isTerminalOpen, setTerminalOpen] = useState(previewMode?.get('terminal') === 'open')
   const [isTerminalPinned, setTerminalPinned] = useState(false)
   const [showTerminal, setShowTerminal] = useState(() => previewMode?.get('terminal') === 'open' || window.localStorage.getItem('pz-vault-show-terminal') === 'true' || window.localStorage.getItem('pz-vault-show-recent-activity') === 'true')
@@ -234,6 +276,7 @@ export const App = (): React.JSX.Element => {
     setSwitchingVersion(versionId)
     try {
       const next = await window.vault.activateVersion(versionId)
+      setCompatibilityReport(null)
       setSnapshot(next)
       setVersions(await window.vault.listVersions())
       const selected = versions.find((version) => version.id === versionId)
@@ -249,6 +292,7 @@ export const App = (): React.JSX.Element => {
     setSwitchingVersion('steam-original')
     try {
       const next = await window.vault.activateSteam()
+      setCompatibilityReport(null)
       setSnapshot(next)
       setVersions(await window.vault.listVersions())
       setNotice({ kind: 'success', text: '已将“Steam 原版”设为当前版本' })
@@ -314,6 +358,21 @@ export const App = (): React.JSX.Element => {
       setNotice({ kind: 'error', text: error instanceof Error ? error.message : '操作失败，请查看日志。' })
     } finally {
       setBusyAction(null)
+    }
+  }
+
+  const runCompatibilityAnalysis = async (): Promise<void> => {
+    setCompatibilityLoading(true)
+    setCompatibilityReport(null)
+    try {
+      const report = await window.vault.analyzeCompatibility()
+      setCompatibilityReport(report)
+      setNotice({ kind: report.verdict === 'blocker' ? 'error' : 'success', text: report.verdict === 'blocker' ? `兼容性分析完成：发现 ${report.summary.blockers} 个阻断项` : '兼容性分析完成' })
+      await refresh()
+    } catch (error) {
+      setNotice({ kind: 'error', text: error instanceof Error ? error.message : '兼容性分析失败。' })
+    } finally {
+      setCompatibilityLoading(false)
     }
   }
 
@@ -462,9 +521,9 @@ export const App = (): React.JSX.Element => {
               {maintenanceSection === 'version-control' ? <section className="migration-workflow enter delay-2">
                 <div className="workflow-header"><div><span className="eyebrow">NEW MANAGED VERSION</span><h2>创建受管版本</h2><p>明确选择来源、迁移模式和目标库。每次执行都会创建新的版本目录，不要求目标中预先存在文件。</p></div><div className={`workflow-ready ${migrationPreview?.canRun ? 'ready' : ''}`}><span />{migrationPreview?.canRun ? '可以执行' : '等待配置'}</div></div>
                 <div className="workflow-step"><div className="step-index">1</div><div className="step-body"><h3>选择迁移来源</h3><p>来源可以是实时 Steam 原版，也可以是版本库中的任意冻结版本。</p><div className="choice-grid source-choices"><button className={migrationSourceType === 'Steam' ? 'selected' : ''} onClick={() => { setMigrationSourceType('Steam'); setMigrationSourceId('') }}><div className="choice-icon steam"><span>ST</span></div><div><b>Steam 原版</b><small>{steam?.detected ? `${steam.version} · Build ${steam.buildId}` : steam?.issue ?? '正在检测'}</small></div>{migrationSourceType === 'Steam' && <CheckCircle2 />}</button><button className={migrationSourceType === 'Frozen' ? 'selected' : ''} disabled={!versions.length} onClick={() => { setMigrationSourceType('Frozen'); setMigrationSourceId((current) => current || versions[0]?.id || '') }}><div className="choice-icon"><Boxes /></div><div><b>已有冻结版本</b><small>{versions.length ? `${versions.length} 个版本可选` : '版本库为空'}</small></div>{migrationSourceType === 'Frozen' && <CheckCircle2 />}</button></div>{migrationSourceType === 'Frozen' && <label className="field-label">具体来源<select value={migrationSourceId} onChange={(event) => setMigrationSourceId(event.target.value)}><option value="">请选择冻结版本</option>{versions.map((version) => <option value={version.id} key={version.id}>{version.name} · {version.version} · Build {version.buildId ?? '—'}{version.isActive ? '（当前）' : ''}</option>)}</select></label>}</div></div>
-                <div className="workflow-step"><div className="step-index">2</div><div className="step-body"><h3>选择迁移模式</h3><p>安全复制占用更多空间；实验性快速复用仅适用于已有冻结版本。</p><div className="choice-grid mode-choices"><button className={migrationMode === 'SafeCopy' ? 'selected' : ''} onClick={() => setMigrationMode('SafeCopy')}><div className="choice-icon"><Copy /></div><div><b>安全完整复制</b><small>游戏、MOD、配置和存档全部独立</small><em>推荐</em></div>{migrationMode === 'SafeCopy' && <CheckCircle2 />}</button><button className={migrationMode === 'FastLink' ? 'selected risk' : 'risk'} onClick={() => setMigrationMode('FastLink')}><div className="choice-icon amber"><Zap /></div><div><b>实验性快速复用</b><small>硬链接复用只读资源，可变内容保持独立</small><em>兼容风险</em></div>{migrationMode === 'FastLink' && <CheckCircle2 />}</button></div></div></div>
-                <div className="workflow-step"><div className="step-index">3</div><div className="step-body"><h3>命名并确认迁移位置</h3><p>名称是所有页面显示的主标题；游戏版本号和 Build 只作为技术信息。完成后会自动登记并切换到新版本。</p><div className="destination-row"><div><span>版本管理目录</span><code>{snapshot?.managerRoot ?? '尚未选择'}</code></div><button className="secondary-button" onClick={() => void chooseRoot()}><FolderCog />更换</button></div><label className="field-label">版本名称（必填）<input value={migrationLabel} onChange={(event) => setMigrationLabel(event.target.value)} placeholder="例如：长期生存主档、怀旧模组服" required /></label>{migrationPreview && <div className={`migration-preview ${migrationPreview.canRun ? 'ready' : 'blocked'}`}><div className="preview-path"><span>计划目标</span><code>{migrationPreview.targetPath ?? '尚未生成'}</code></div>{migrationPreview.steps.map((step, index) => <div className="preview-step" key={step}><span>{index + 1}</span>{step}</div>)}{migrationPreview.warnings.map((warning) => <div className="preview-warning" key={warning}><ShieldAlert />{warning}</div>)}</div>}<button className="migration-execute" disabled={!migrationPreview?.canRun || migrationBusy} onClick={() => void migrateVersion()}>{migrationBusy ? <LoaderCircle className="spin" /> : <ArrowRight />}开始创建受管版本</button></div></div>
-              </section> : maintenanceSection === 'integrity' ? <section className="maintenance-grid enter delay-2"><article className="tool-card featured"><div className="tool-card-head"><div className="tool-icon"><ClipboardCheck /></div><span>SHA-256</span></div><h3>完整性校验</h3><p>重新计算当前冻结游戏和本地 MOD 的 SHA-256，并与创建时基线逐项比较。</p><button className="tool-action primary" disabled={!snapshot?.isHealthy || isBusy} onClick={() => void perform('Verify')}>{busyAction === 'Verify' ? <LoaderCircle className="spin" /> : <RefreshCw />}校验当前版本</button></article><article className="tool-card"><div className="tool-card-head"><div className="tool-icon blue"><ShieldCheck /></div><span>结构识别</span></div><h3>兼容性分析</h3><p>检查版本、Build、MOD 目录、依赖和可变文件边界，为后续智能迁移与共享仓库建立依据。</p><button className="tool-action" disabled><Wrench />规则库建设中</button></article></section> : <section className="share-import-panel enter delay-2"><div className="share-hero"><div className="share-icon"><PackageOpen /></div><div><span className="eyebrow">PZ SHARE PACKAGE</span><h2>共享包导入</h2><p>目标格式只保存版本清单、内容哈希和用户允许分享的资源，不包含个人存档、账号信息或运行时配置。</p></div></div><div className="share-principles"><div><CheckCircle2 /><span><b>可共享</b><small>游戏只读资源、已验证 MOD、内容哈希清单</small></span></div><div><ShieldAlert /><span><b>必须隔离</b><small>Saves、数据库、options.ini、日志、启用配置与 cache</small></span></div></div><button className="migration-execute" disabled><PackageOpen />共享包格式 v1 设计中</button><p className="share-footnote">下一阶段将先实现包清单验证与缺失内容分析，再开放正式导入，避免未经识别的文件直接进入版本库。</p></section>}
+                <div className="workflow-step"><div className="step-index">2</div><div className="step-body"><h3>选择迁移模式</h3><p>完整复制可独立移动；快速薄版本依赖一个不可变冻结版，只新增当前版本真正需要的文件。</p><div className="choice-grid mode-choices"><button className={migrationMode === 'SafeCopy' ? 'selected' : ''} onClick={() => setMigrationMode('SafeCopy')}><div className="choice-icon"><Copy /></div><div><b>安全完整复制</b><small>游戏、MOD、配置和存档全部独立</small><em>可独立归档</em></div>{migrationMode === 'SafeCopy' && <CheckCircle2 />}</button><button className={migrationMode === 'FastLink' ? 'selected risk' : 'risk'} onClick={() => setMigrationMode('FastLink')}><div className="choice-icon amber"><Zap /></div><div><b>快速薄版本</b><small>引用游戏核心与启用 MOD，仅复制存档和配置</small><em>低空间占用</em></div>{migrationMode === 'FastLink' && <CheckCircle2 />}</button></div></div></div>
+                <div className="workflow-step"><div className="step-index">3</div><div className="step-body"><h3>命名并确认迁移位置</h3><p>名称是所有页面显示的主标题；游戏版本号和 Build 只作为技术信息。完成后会自动登记并切换到新版本。</p><div className="destination-row"><div><span>版本管理目录</span><code>{snapshot?.managerRoot ?? '尚未选择'}</code></div><button className="secondary-button" onClick={() => void chooseRoot()}><FolderCog />更换</button></div><label className="field-label">版本名称（必填）<input value={migrationLabel} onChange={(event) => setMigrationLabel(event.target.value)} placeholder="例如：长期生存主档、怀旧模组服" required /></label>{migrationPreview && <div className={`migration-preview ${migrationPreview.canRun ? 'ready' : 'blocked'}`}><div className="preview-path"><span>计划目标</span><code>{migrationPreview.targetPath ?? '尚未生成'}</code></div>{migrationPreview.analysis && <div className="migration-storage-analysis"><div><span>预计新增</span><b>{formatBytes(migrationPreview.analysis.estimatedWriteBytes)}</b><small>{migrationPreview.analysis.copiedMutableFiles} 个独立文件</small></div><div><span>引用游戏核心</span><b>{formatBytes(migrationPreview.analysis.sourceGameBytes)}</b><small>{migrationPreview.analysis.sourceGameFiles} 个文件</small></div><div><span>挂接启用 MOD</span><b>{formatBytes(migrationPreview.analysis.referencedModBytes)}</b><small>{migrationPreview.analysis.referencedModRoots} 个根目录</small></div><div className="saved"><span>预计节省</span><b>{formatBytes(migrationPreview.analysis.estimatedSavedBytes)}</b><small>相对完整复制</small></div></div>}{migrationPreview.steps.map((step, index) => <div className="preview-step" key={step}><span>{index + 1}</span>{step}</div>)}{migrationPreview.warnings.map((warning) => <div className="preview-warning" key={warning}><ShieldAlert />{warning}</div>)}</div>}<button className="migration-execute" disabled={!migrationPreview?.canRun || migrationBusy} onClick={() => void migrateVersion()}>{migrationBusy ? <LoaderCircle className="spin" /> : <ArrowRight />}开始创建受管版本</button></div></div>
+              </section> : maintenanceSection === 'integrity' ? <div className="compatibility-workspace enter delay-2"><section className="maintenance-grid"><article className="tool-card featured"><div className="tool-card-head"><div className="tool-icon"><ClipboardCheck /></div><span>SHA-256</span></div><h3>完整性校验</h3><p>重新计算当前冻结游戏和本地 MOD 的 SHA-256，并与创建时基线逐项比较。</p><button className="tool-action primary" disabled={!snapshot?.isHealthy || isBusy} onClick={() => void perform('Verify')}>{busyAction === 'Verify' ? <LoaderCircle className="spin" /> : <RefreshCw />}校验当前版本</button></article><article className="tool-card"><div className="tool-card-head"><div className="tool-icon blue"><ShieldCheck /></div><span>B42 规则引擎</span></div><h3>兼容性分析</h3><p>解析二进制版本身份、B42 版本目录、依赖图、存档/服务器清单与语义文件覆盖。</p><button className="tool-action" disabled={compatibilityLoading || (snapshot?.activeSource === 'Steam' ? !steam?.detected : !snapshot?.isHealthy)} onClick={() => void runCompatibilityAnalysis()}>{compatibilityLoading ? <LoaderCircle className="spin" /> : <Wrench />}{compatibilityLoading ? '正在扫描 MOD 与依赖' : '开始兼容性分析'}</button></article></section>{compatibilityLoading && <div className="compatibility-loading"><LoaderCircle className="spin" /><div><b>正在建立 MOD 关系数据库</b><span>扫描版本变体、依赖、存档、服务器和有效文件层</span></div></div>}{compatibilityReport && <CompatibilityResults report={compatibilityReport} />}</div> : <section className="share-import-panel enter delay-2"><div className="share-hero"><div className="share-icon"><PackageOpen /></div><div><span className="eyebrow">PZ SHARE PACKAGE</span><h2>共享包导入</h2><p>目标格式只保存版本清单、内容哈希和用户允许分享的资源，不包含个人存档、账号信息或运行时配置。</p></div></div><div className="share-principles"><div><CheckCircle2 /><span><b>可共享</b><small>游戏只读资源、已验证 MOD、内容哈希清单</small></span></div><div><ShieldAlert /><span><b>必须隔离</b><small>Saves、数据库、options.ini、日志、启用配置与 cache</small></span></div></div><button className="migration-execute" disabled><PackageOpen />共享包格式 v1 设计中</button><p className="share-footnote">下一阶段将先实现包清单验证与缺失内容分析，再开放正式导入，避免未经识别的文件直接进入版本库。</p></section>}
             </>
           ) : activeView === 'help' ? (
             <>

@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { app, BrowserWindow, ipcMain, shell } from 'electron'
 
 import type { LauncherAction } from '../shared/types'
+import { analyzeCompatibility } from './compatibility-service'
 import { executeMigration, previewMigration } from './migration-service'
 import { detectSteamInstallation, launchSteamGame, validateSteamGame } from './steam-service'
 import { activateSteam, activateVersion, chooseManagerRoot, getSnapshot, listCurrentMods, listVersions, openLogs, runAction } from './vault-service'
@@ -58,6 +59,7 @@ app.whenReady().then(() => {
   ipcMain.handle('vault:validate-steam', validateSteamGame)
   ipcMain.handle('vault:open-path', async (_event, targetPath: string) => (await shell.openPath(targetPath)) === '')
   ipcMain.handle('vault:list-current-mods', listCurrentMods)
+  ipcMain.handle('vault:analyze-compatibility', analyzeCompatibility)
   ipcMain.handle('vault:list-versions', listVersions)
   ipcMain.handle('vault:activate-version', (_event, versionId: string) => activateVersion(versionId))
   ipcMain.handle('vault:activate-steam', activateSteam)

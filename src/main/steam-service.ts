@@ -7,6 +7,7 @@ import { promisify } from 'node:util'
 import { shell } from 'electron'
 
 import type { SteamInstallation } from '../shared/types'
+import { readGameIdentity } from './game-identity'
 
 const execFileAsync = promisify(execFile)
 const APP_ID = '108600'
@@ -63,18 +64,17 @@ export const detectSteamInstallation = async (): Promise<SteamInstallation> => {
       if (!existsSync(manifestPath)) continue
       try {
         const manifest = await fs.readFile(manifestPath, 'utf8')
-        const manifestStats = await fs.stat(manifestPath)
         const installName = manifest.match(/"installdir"\s+"([^"]+)"/i)?.[1]
         const buildId = manifest.match(/"buildid"\s+"([^"]+)"/i)?.[1] ?? 'unknown'
+        const lastUpdated = Number(manifest.match(/"LastUpdated"\s+"(\d+)"/i)?.[1] ?? 0)
         if (!installName) continue
         const gamePath = path.join(steamApps, 'common', installName)
         const executablePath = path.join(gamePath, 'ProjectZomboid64.exe')
         if (!existsSync(executablePath)) continue
         const workshopPath = path.join(steamApps, 'workshop', 'content', APP_ID)
         const cachePath = path.join(os.homedir(), 'Zomboid')
-        let fullVersion = ''
-        try { fullVersion = (await fs.readFile(path.join(cachePath, 'version.txt'), 'utf8')).trim() } catch { /* optional */ }
-        const version = fullVersion.match(/^(\d+\.\d+\.\d+)/m)?.[1] ?? 'unknown'
+        const identity = await readGameIdentity(gamePath, buildId, cachePath)
+        const fullVersion = [identity.version, identity.revision].filter(Boolean).join(' ')
         return {
           detected: true,
           issue: null,
@@ -85,10 +85,15 @@ export const detectSteamInstallation = async (): Promise<SteamInstallation> => {
           executablePath,
           workshopPath,
           cachePath,
-          version,
+          version: identity.version,
           fullVersion,
+          revision: identity.revision,
+          gameJarSha256: identity.jarSha256,
+          identityStatus: identity.status,
+          cachedVersion: identity.cachedVersion,
+          cachedRevision: identity.cachedRevision,
           buildId,
-          installedAt: manifestStats.mtime.toISOString(),
+          installedAt: lastUpdated > 0 ? new Date(lastUpdated * 1000).toISOString() : (await fs.stat(manifestPath)).mtime.toISOString(),
           workshopProjectCount: await countDirectories(workshopPath)
         }
       } catch {
@@ -108,6 +113,11 @@ export const detectSteamInstallation = async (): Promise<SteamInstallation> => {
     cachePath: path.join(os.homedir(), 'Zomboid'),
     version: 'unknown',
     fullVersion: '',
+    revision: null,
+    gameJarSha256: null,
+    identityStatus: 'unknown',
+    cachedVersion: null,
+    cachedRevision: null,
     buildId: 'unknown',
     installedAt: null,
     workshopProjectCount: 0
