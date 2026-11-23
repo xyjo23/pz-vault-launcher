@@ -54,6 +54,12 @@ const thinDependencyIssue = (config: FreezeConfig): string | null => {
   return missing ? `薄版本 MOD 引用不存在：${missing.name}` : null
 }
 
+const effectiveModCount = (config: FreezeConfig): number | undefined => (
+  config.StorageMode === 'ThinReference' && config.ReferencedMods
+    ? new Set(config.ReferencedMods.flatMap((mod) => mod.modIds)).size
+    : config.EffectiveModCount
+)
+
 export const listCurrentMods = async (): Promise<ModSummary[]> => {
   const snapshot = await getSnapshot()
   if (snapshot.activeSource === 'Steam') {
@@ -107,6 +113,7 @@ export const getSnapshot = async (): Promise<LauncherSnapshot> => {
 
   try {
     const config = parseJson<FreezeConfig>(await fs.readFile(configPath, 'utf8'))
+    config.EffectiveModCount = effectiveModCount(config)
     const requiredPaths = [config.FreezeRoot, config.GamePath, config.CachePath]
     const missingPath = requiredPaths.find((candidate) => !candidate || !existsSync(candidate))
     const dependencyIssue = missingPath ? null : thinDependencyIssue(config)
@@ -181,12 +188,15 @@ export const listVersions = async (): Promise<FreezeVersionSummary[]> => {
           id: entry.name,
           name: config.DisplayName?.trim() || entry.name,
           freezeRoot,
+          gamePath,
+          cachePath,
+          backupPath: config.BackupPath || path.join(freezeRoot, 'backups'),
           version: config.Version ?? entry.name,
           fullVersion: config.FullVersion,
           buildId: config.BuildID,
           created: config.Created,
           workshopProjectCount: config.WorkshopProjectCount,
-          effectiveModCount: config.EffectiveModCount,
+          effectiveModCount: effectiveModCount(config),
           storageMode: config.StorageMode ?? 'FullCopy',
           isActive: snapshot.activeSource === 'Frozen' && path.resolve(snapshot.config?.FreezeRoot ?? '') === path.resolve(freezeRoot),
           isHealthy: dependencyHealthy && existsSync(gamePath) && existsSync(cachePath)

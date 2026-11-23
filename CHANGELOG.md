@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.1-preview - 2026-11-23
+
+- Allowed Quick Thin Version creation when a save or server context references already-missing Mod IDs; the analysis report keeps the missing evidence while the migration links every currently installed MOD.
+- Corrected thin-version effective MOD counts to use materialized Mod IDs instead of the stale requested list.
+- Displayed the real referenced game path, independent cache and backup path in thin-version details.
+- Replaced the Help placeholders with six complete in-app tutorials covering first run, switching, migration, B42 MOD analysis and recovery.
+- Added a practical full-copy and quick-migration test guide.
+- Revalidated both a Full Copy and a Thin Reference against Project Zomboid 42.22.2 / revision `3d39148846`; both reached the main menu and exited normally.
+
 ## 0.7.0-preview - 2026-11-20
 
 - Replaced cached text version detection with binary identity parsing for B42 version, revision and `Core.jar` SHA-256 evidence.

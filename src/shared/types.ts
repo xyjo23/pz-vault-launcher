@@ -128,6 +128,9 @@ export type FreezeVersionSummary = {
   id: string
   name: string
   freezeRoot: string
+  gamePath?: string
+  cachePath?: string
+  backupPath?: string
   version: string
   fullVersion?: string
   buildId?: string

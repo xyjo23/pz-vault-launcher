@@ -152,7 +152,11 @@ const buildPlan = async (sourceRoot: string, config: FreezeConfig): Promise<Quic
   for (const id of selectedIds) {
     for (const mod of byId.get(id) ?? []) selectedRoots.set(path.resolve(mod.record.rootPath).toLowerCase(), mod)
   }
-  if (fallbackToAllMods) {
+  // A stale save can reference MOD IDs that no longer exist in the frozen source.
+  // The thin version must still be able to preserve that source faithfully: keep
+  // the missing-ID evidence, but materialize every MOD that is actually present
+  // instead of silently producing a smaller and less useful subset.
+  if (fallbackToAllMods || missingModIds.length > 0) {
     for (const mod of installedMods) selectedRoots.set(path.resolve(mod.record.rootPath).toLowerCase(), mod)
   }
 

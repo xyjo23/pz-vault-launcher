@@ -107,13 +107,13 @@ export const previewMigration = async (request: MigrationRequest): Promise<Migra
       }
       warnings.push(`快速薄版本依赖基础冻结版“${source.config.DisplayName?.trim() || path.basename(source.root)}”；基础版本不可移动或删除。`)
       if (analysis.fallbackToAllMods) warnings.push('没有找到存档或服务器 MOD 上下文，将引用全部已安装 MOD，空间节省仍主要来自游戏核心。')
-      if (analysis.missingModIds.length) warnings.push(`启用列表中有 ${analysis.missingModIds.length} 个 Mod ID 未安装：${analysis.missingModIds.slice(0, 8).join('、')}`)
+      if (analysis.missingModIds.length) warnings.push(`启用列表中有 ${analysis.missingModIds.length} 个 Mod ID 未安装；快速版本会保留缺失证据并挂接当前全部已安装 MOD，但不会补全这些缺失内容：${analysis.missingModIds.slice(0, 8).join('、')}`)
     } catch (error) {
       warnings.push(`快速迁移分析失败：${error instanceof Error ? error.message : String(error)}`)
     }
   }
   return {
-    canRun: Boolean(request.label?.trim()) && !existsSync(targetPath) && isAsciiPath(targetPath) && source.config.StorageMode !== 'ThinReference' && (request.mode !== 'FastLink' || Boolean(analysis && analysis.missingModIds.length === 0)),
+    canRun: Boolean(request.label?.trim()) && !existsSync(targetPath) && isAsciiPath(targetPath) && source.config.StorageMode !== 'ThinReference' && (request.mode !== 'FastLink' || Boolean(analysis)),
     sourceLabel: source.config.DisplayName?.trim() || `冻结版本 ${source.config.Version ?? request.sourceId}`,
     sourcePath: source.root,
     targetPath,
@@ -254,7 +254,6 @@ const migrateFromFrozen = async (request: MigrationRequest, targetRoot: string):
 
     if (source.config.StorageMode === 'ThinReference') throw new Error('薄版本不能继续作为基础版本，请选择完整冻结版')
     const plan = await analyzeQuickMigration(source.root, source.config)
-    if (plan.analysis.missingModIds.length) throw new Error(`启用列表存在未安装 Mod ID：${plan.analysis.missingModIds.join('、')}`)
     const baseIdentity = await readGameIdentity(plan.sourceGamePath, source.config.BuildID ?? 'unknown', plan.sourceCachePath)
     if (source.config.Revision && baseIdentity.revision !== source.config.Revision) throw new Error(`基础版本 revision 已变化：预期 ${source.config.Revision}，实际 ${baseIdentity.revision ?? 'unknown'}`)
     if (source.config.GameJarSHA256 && baseIdentity.jarSha256 !== source.config.GameJarSHA256) throw new Error('基础版本游戏 JAR 与冻结身份不一致，请先执行完整性校验')
@@ -277,13 +276,13 @@ const migrateFromFrozen = async (request: MigrationRequest, targetRoot: string):
       IdentityStatus: baseIdentity.status,
       MutableCachePolicyVersion: 1,
       ReferencedMods: referencedMods,
-      EffectiveModCount: plan.analysis.activeModIds.length,
+      EffectiveModCount: new Set(referencedMods.flatMap((mod) => mod.modIds)).size,
       WorkshopProjectCount: new Set(referencedMods.flatMap((mod) => mod.workshopId ? [mod.workshopId] : [])).size
     })
     const record = { schemaVersion: 2, createdAt: new Date().toISOString(), source: source.root, target: targetRoot, storageMode: config.StorageMode, analysis: plan.analysis, referencedMods }
     await fs.writeFile(path.join(targetRoot, 'metadata', 'reuse-record.json'), JSON.stringify(record, null, 2), 'utf8')
     await fs.writeFile(path.join(targetRoot, 'reports', 'quick-migration-analysis.json'), JSON.stringify(plan.analysis, null, 2), 'utf8')
-    return `快速薄版本创建完成：游戏核心引用 ${plan.analysis.sourceGameFiles} 个文件；启用 MOD ${referencedMods.length} 个根目录，硬链接 ${hardLinkedModFiles} 个文件、回退复制 ${copiedModFiles} 个；独立数据 ${plan.analysis.copiedMutableFiles} 个文件。基础冻结版不可移动或删除。${saveBackup ? `\n迁移前存档快照：${saveBackup}` : ''}`
+    return `快速薄版本创建完成：游戏核心引用 ${plan.analysis.sourceGameFiles} 个文件；可用 MOD ${referencedMods.length} 个根目录，硬链接 ${hardLinkedModFiles} 个文件、回退复制 ${copiedModFiles} 个；独立数据 ${plan.analysis.copiedMutableFiles} 个文件。${plan.analysis.missingModIds.length ? ` 启用上下文仍有 ${plan.analysis.missingModIds.length} 个 Mod ID 在来源中缺失，证据已写入分析报告。` : ''}基础冻结版不可移动或删除。${saveBackup ? `\n迁移前存档快照：${saveBackup}` : ''}`
   } catch (error) {
     throw new Error(`${error instanceof Error ? error.message : '迁移失败'}；未完成的目标保留在 ${targetRoot}，便于检查后手动清理。`)
   }

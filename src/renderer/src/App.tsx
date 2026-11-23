@@ -42,6 +42,137 @@ import { VaultMark } from './VaultMark'
 type Notice = { kind: 'success' | 'error'; text: string } | null
 type AppView = 'console' | 'versions' | 'maintenance' | 'help' | 'settings'
 type VersionDetailSelection = { kind: 'Steam' } | { kind: 'Frozen'; id: string }
+type HelpTopicId = 'getting-started' | 'console' | 'versions' | 'migration' | 'compatibility' | 'troubleshooting'
+type HelpTutorial = {
+  id: HelpTopicId
+  number: string
+  eyebrow: string
+  title: string
+  summary: string
+  prerequisites: string[]
+  sections: Array<{
+    title: string
+    intro: string
+    steps: Array<{ title: string; detail: string }>
+  }>
+  result: string
+  warning?: string
+}
+
+const helpTutorials: HelpTutorial[] = [
+  {
+    id: 'getting-started', number: '01', eyebrow: 'FIRST RUN', title: '首次配置',
+    summary: '从识别 Steam 到选定版本库，完成第一次可启动配置。',
+    prerequisites: ['Steam 已安装 Project Zomboid', '游戏至少通过 Steam 正常启动过一次', '准备一个空间充足的 NTFS 目录作为版本库'],
+    sections: [
+      { title: '确认 Steam 原版', intro: '启动器会读取 Steam 库、AppID 108600 清单和游戏二进制身份。', steps: [
+        { title: '打开控制台', detail: '看到“Steam 原版”、版本号与 Build 编号，说明游戏目录已被识别。' },
+        { title: '处理未识别状态', detail: '先退出并重启 Steam，再回到控制台点击“重新检测”；不要手工伪造 Build 编号。' }
+      ] },
+      { title: '建立版本库', intro: '版本库保存冻结游戏、独立配置、存档与校验数据。', steps: [
+        { title: '进入维护工具', detail: '点击“选择管理目录”，建议使用固定盘符下的独立文件夹，不要选择 Steam 游戏目录本身。' },
+        { title: '开启存档保护', detail: '在设置中启用迁移前安全快照，创建版本前会额外备份 Saves、数据库和根配置。' }
+      ] }
+    ],
+    result: '控制台能显示 Steam 版本身份，维护工具能预览目标路径，即完成首次配置。',
+    warning: '移动或重命名版本库后，先重新选择管理目录；不要直接修改 current-freeze.json。'
+  },
+  {
+    id: 'console', number: '02', eyebrow: 'PLAY & SWITCH', title: '启动与切换',
+    summary: '在 Steam 原版和冻结版之间安全切换，并确认实际启动身份。',
+    prerequisites: ['Steam 客户端处于登录状态', '目标版本显示“检查通过”', '联机双方使用相同游戏 Build 与相同 MOD 集合'],
+    sections: [
+      { title: '选择当前版本', intro: '“当前版本”决定控制台后续的启动、模组扫描、备份和校验目标。', steps: [
+        { title: '进入版本管理', detail: '在列表中点击目标版本查看详情；雷达模式下双击光点可切换。' },
+        { title: '执行切换', detail: '点击“切换”，等待版本标记变为“当前”。切换只更新指向，不会删除或移动版本文件。' }
+      ] },
+      { title: '启动并验证', intro: '冻结版仍通过 Steam 身份启动，但游戏文件、缓存和存档来自隔离目录。', steps: [
+        { title: '返回控制台启动', detail: '确认名称、版本和 Build 后点击“启动当前版本”，不要同时启动另一个 Project Zomboid 实例。' },
+        { title: '检查游戏主菜单', detail: '进入游戏后核对右下角版本号，并在 MOD 页面确认启用列表与目标冻结版一致。' }
+      ] }
+    ],
+    result: '控制台显示目标版本，游戏主菜单版本一致，且独立存档目录可见，说明切换生效。',
+    warning: '同一 Steam 账号通常不能同时运行两份受 Steam 管理的游戏；联机还受服务器 Build、MOD ID 和加载顺序约束。'
+  },
+  {
+    id: 'versions', number: '03', eyebrow: 'VERSION LIBRARY', title: '版本管理',
+    summary: '理解 Steam 原版、完整冻结版和快速薄版本之间的关系。',
+    prerequisites: ['已选择版本管理目录', '至少存在 Steam 原版或一个健康冻结版', '创建前关闭游戏和可能占用文件的工具'],
+    sections: [
+      { title: '识别三种状态', intro: '版本卡以可启动性为核心，不只依赖文件夹名称。', steps: [
+        { title: 'Steam 原版', detail: '由 Steam 更新，Build 可能变化；适合作为新冻结版来源。' },
+        { title: '完整冻结版', detail: '游戏、MOD 和可变数据均独立，占用更大但便于整体归档或移动。' },
+        { title: '快速薄版本', detail: '直接引用完整冻结版的游戏核心，并以同卷 NTFS 硬链接复用启用 MOD；存档和运行时配置仍保持独立。' }
+      ] },
+      { title: '日常管理流程', intro: '先检查健康状态，再切换和启动。', steps: [
+        { title: '查看版本详情', detail: '点击版本卡，核对冻结时间、有效模组、Workshop 数量以及文件位置。' },
+        { title: '发现不可用版本', detail: '不要反复启动；先确认版本目录、game、cache 等核心路径没有被移动或删除。' }
+      ] }
+    ],
+    result: '健康版本可切换、可打开目录且能读取版本和模组摘要；异常版本会被阻止启动。',
+    warning: '薄版本依赖同卷 NTFS 文件关系。不要用会破坏硬链接语义的网盘同步或不明清理工具处理版本库。'
+  },
+  {
+    id: 'migration', number: '04', eyebrow: 'FAST MIGRATION', title: '创建与快速迁移',
+    summary: '用完整复制或硬链接快速建立新版本，并保护可变数据。',
+    prerequisites: ['来源版本健康且游戏已退出', 'Steam 只能创建完整冻结版；快速模式必须选择完整冻结版作为来源', '快速模式的 MOD 硬链接要求来源与目标位于同一个 NTFS 卷', '版本名称必填且目标磁盘空间满足预览要求'],
+    sections: [
+      { title: '配置迁移任务', intro: '维护工具会在执行前展示来源、目标和预计空间变化。', steps: [
+        { title: '选择来源', detail: '从实时 Steam 原版只能做完整复制，可锁定当前 Build；快速迁移必须选择一个非薄版本的完整冻结版。' },
+        { title: '选择模式', detail: '需要完全独立或跨盘移动时选“安全完整复制”；同盘快速建版选“快速薄版本”。' },
+        { title: '命名并检查预览', detail: '核对计划目标、预计新增、引用游戏核心、挂接 MOD 和预计节省，确认没有阻断警告。' }
+      ] },
+      { title: '执行后验收', intro: '迁移完成不等于立即删除来源，必须先验证新版本。', steps: [
+        { title: '等待登记完成', detail: '终端显示完成后，新版本会自动登记并切换为当前版本。' },
+        { title: '连续验证', detail: '先执行完整性校验，再启动到主菜单并打开一个测试存档；确认退出正常后再用于长期游玩。' }
+      ] }
+    ],
+    result: '新版本出现在版本管理中、状态健康、可启动，存档与配置位于自己的 cache 目录。',
+    warning: '快速薄版本依赖其基础完整冻结版：基础版不可移动或删除。Saves、数据库、options.ini、日志与运行时 cache 会保持独立，不参与引用或硬链接。'
+  },
+  {
+    id: 'compatibility', number: '05', eyebrow: 'B42 MOD ANALYSIS', title: 'MOD 兼容性分析',
+    summary: '读取 B42 版本变体、依赖和文件覆盖证据，判断当前集合是否可用。',
+    prerequisites: ['已切换到要检查的版本', 'Workshop 与本地 MOD 文件可访问', '如需对照存档或服务器，相关配置必须位于当前版本缓存中'],
+    sections: [
+      { title: '运行分析', intro: '分析器按游戏实际目录规则选择 MOD 版本，不会只看 Workshop 标题。', steps: [
+        { title: '进入完整性与兼容性', detail: '先确认页面对应当前版本，再点击“开始兼容性分析”。' },
+        { title: '理解身份关系', detail: 'Workshop ID 是发布项目，Mod ID 是游戏加载身份；同一 Workshop 可包含多个 Mod ID 和版本变体。' }
+      ] },
+      { title: '处理报告', intro: '按严重程度从上到下处理，并保留报告中的路径与 ID 证据。', steps: [
+        { title: '阻断', detail: '优先修复缺失依赖、循环依赖、重复 Mod ID、明确互斥和不满足的版本条件。' },
+        { title: '警告与待验证', detail: '检查加载顺序、存档或服务器清单差异，以及无法仅靠静态文件确认的脚本行为。' },
+        { title: '文件重叠', detail: '配置叠加、资源覆盖和代码覆盖含义不同；代码或地图覆盖需要重点核查加载顺序。' }
+      ] }
+    ],
+    result: '阻断项归零，并确认所有警告的理由后，再复制存档进行实际进服或开档验证。',
+    warning: '“通过”代表静态证据未发现已知问题，不保证所有 MOD 在运行时绝对兼容。更新 MOD 后应重新分析。'
+  },
+  {
+    id: 'troubleshooting', number: '06', eyebrow: 'RECOVERY', title: '故障排查',
+    summary: '针对闪退、版本不符、MOD 缺失和迁移失败进行有证据的排查。',
+    prerequisites: ['暂时不要删除来源版本和备份', '记录复现步骤与当前版本名称', '通过设置页面打开日志目录'],
+    sections: [
+      { title: '启动或闪退', intro: '先区分启动器未拉起游戏、游戏启动后退出、进入存档后崩溃。', steps: [
+        { title: '核对版本身份', detail: '查看控制台 Build、游戏主菜单版本以及目标服务器版本，三者必须匹配。' },
+        { title: '查看日志', detail: '打开启动器日志和当前版本 cache 下的 console.txt，搜索 ERROR、Exception 和最后加载的 MOD。' },
+        { title: '最小化验证', detail: '保留原版本不动，在副本或新测试版本中停用可疑 MOD，逐批恢复以定位问题。' }
+      ] },
+      { title: '迁移或 MOD 异常', intro: '不要用覆盖复制修补未知状态，先确定缺失的是文件、身份还是依赖。', steps: [
+        { title: '运行完整性校验', detail: '确认游戏与本地 MOD 是否偏离创建时 SHA-256 基线。' },
+        { title: '运行兼容性分析', detail: '保存缺失依赖、重复 ID、清单差异和覆盖路径，按报告证据修复。' },
+        { title: '回退到健康版本', detail: '直接切换回此前健康冻结版；切换操作不会删除故障版本，便于继续取证。' }
+      ] }
+    ],
+    result: '能稳定复现、找到对应日志证据，并在健康版本或最小 MOD 集合中恢复启动，才算完成定位。',
+    warning: '不要在没有备份时删除 Saves、Workshop 内容或整个版本目录。需要反馈时请附版本名、Build、操作时间和日志末段。'
+  }
+]
+
+const HelpTopicIcon = ({ id }: { id: HelpTopicId }): React.JSX.Element => {
+  const Icon = id === 'getting-started' ? BookOpen : id === 'console' ? LayoutDashboard : id === 'versions' ? Boxes : id === 'migration' ? Zap : id === 'compatibility' ? ClipboardCheck : Wrench
+  return <Icon />
+}
 
 const actionPlans: Record<LauncherAction, string[]> = {
   Launch: ['读取并校验当前冻结配置', '绑定独立缓存与启动参数', '启动所选 Project Zomboid 版本'],
@@ -201,6 +332,8 @@ export const App = (): React.JSX.Element => {
   const previewMode = import.meta.env.DEV ? new URLSearchParams(window.location.search) : null
   const previewView = previewMode?.get('view')
   const [activeView, setActiveView] = useState<AppView>(['versions', 'maintenance', 'help', 'settings'].includes(previewView ?? '') ? previewView as AppView : 'console')
+  const previewHelpTopic = previewMode?.get('helpTopic') as HelpTopicId | null
+  const [activeHelpTopic, setActiveHelpTopic] = useState<HelpTopicId | null>(() => helpTutorials.some((topic) => topic.id === previewHelpTopic) ? previewHelpTopic : null)
   const [isDrawerOpen, setDrawerOpen] = useState(previewMode?.get('drawer') === 'open')
   const [detailSelection, setDetailSelection] = useState<VersionDetailSelection | null>(null)
   const [isModsDrawerOpen, setModsDrawerOpen] = useState(previewMode?.get('mods') === 'open')
@@ -244,6 +377,7 @@ export const App = (): React.JSX.Element => {
         setModsDrawerOpen(false)
         setTerminalOpen(false)
         setTerminalPinned(false)
+        setActiveHelpTopic(null)
       }
     }
     window.addEventListener('keydown', closeOnEscape)
@@ -449,6 +583,8 @@ export const App = (): React.JSX.Element => {
     </button>
   )
   const consoleVersionTools = <section className="console-version-tools single enter delay-3"><button onClick={() => openVersionData('saves')}><div className="console-tool-icon blue"><Database /></div><span><b>存档信息</b><small>查看当前版本独立 Saves</small></span><ChevronRight /></button></section>
+  const selectedHelpTutorial = helpTutorials.find((topic) => topic.id === activeHelpTopic) ?? null
+  const selectedHelpIndex = selectedHelpTutorial ? helpTutorials.findIndex((topic) => topic.id === selectedHelpTutorial.id) : -1
 
   return (
     <div className="app-shell">
@@ -527,13 +663,11 @@ export const App = (): React.JSX.Element => {
             </>
           ) : activeView === 'help' ? (
             <>
-              <section className="page-heading enter"><div><span className="eyebrow">SURVIVOR GUIDE</span><h1>帮助</h1><p>查看完整工作流、功能边界和常见问题；后续将在这里接入日志反馈。</p></div></section>
+              <section className="page-heading enter"><div><span className="eyebrow">SURVIVOR GUIDE</span><h1>帮助中心</h1><p>选择一个主题打开完整教程，按步骤完成配置、迁移、检查或故障恢复。</p></div></section>
               <section className="help-grid enter delay-1">
-                <article className="help-card featured"><div className="help-number">01</div><BookOpen /><h2>控制台</h2><p>围绕当前单个版本启动游戏，并查看它的模组、存档和备份；后续的模组增删也将在“有效模组”抽屉完成。</p></article>
-                <article className="help-card"><div className="help-number">02</div><Boxes /><h2>版本管理</h2><p>统一管理 Steam 原版和冻结版。可以通过版本卡或相对雷达切换当前版本，切换后控制台立即跟随。</p></article>
-                <article className="help-card"><div className="help-number">03</div><Wrench /><h2>维护工具</h2><p>负责制作新冻结版、导入共享包以及执行完整性与兼容性检查；过程输出统一显示在“终端”抽屉。</p></article>
+                {helpTutorials.map((topic, index) => <button className={`help-card ${index === 0 ? 'featured' : ''}`} key={topic.id} onClick={() => setActiveHelpTopic(topic.id)} aria-haspopup="dialog"><div className="help-number">{topic.number}</div><HelpTopicIcon id={topic.id} /><span className="help-card-eyebrow">{topic.eyebrow}</span><h2>{topic.title}</h2><p>{topic.summary}</p><span className="help-card-action">打开详细教程<ArrowRight /></span></button>)}
               </section>
-              <section className="help-note enter delay-2"><CircleAlert /><div><h3>切换版本不会删除文件</h3><p>启动器只更新当前版本指向，并为原来的 current-freeze.json 留下备份。冻结目录中的游戏、模组和存档不会被移动或删除。</p></div></section>
+              <section className="help-note enter delay-2"><CircleAlert /><div><h3>教程不会执行任何操作</h3><p>帮助弹窗只提供说明。切换版本、迁移、校验等操作仍需由你在对应页面明确点击执行。</p></div></section>
             </>
           ) : (
             <>
@@ -547,10 +681,30 @@ export const App = (): React.JSX.Element => {
         </main>
       </div>
 
+      {selectedHelpTutorial && <div className="help-modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setActiveHelpTopic(null) }}>
+        <section className="help-modal" role="dialog" aria-modal="true" aria-labelledby="help-tutorial-title">
+          <aside className="help-modal-nav">
+            <div className="help-modal-brand"><BookOpen /><div><span>使用教程</span><b>生存者手册</b></div></div>
+            <nav aria-label="教程主题">{helpTutorials.map((topic) => <button className={topic.id === selectedHelpTutorial.id ? 'active' : ''} key={topic.id} onClick={() => setActiveHelpTopic(topic.id)}><span>{topic.number}</span><div><b>{topic.title}</b><small>{topic.eyebrow}</small></div><ChevronRight /></button>)}</nav>
+            <div className="help-modal-version"><span>当前教程版本</span><b>v0.7 · B42</b></div>
+          </aside>
+          <div className="help-modal-main">
+            <header className="help-modal-header"><div><span className="eyebrow">{selectedHelpTutorial.eyebrow}</span><h2 id="help-tutorial-title">{selectedHelpTutorial.title}</h2><p>{selectedHelpTutorial.summary}</p></div><button className="icon-button" onClick={() => setActiveHelpTopic(null)} aria-label="关闭教程"><X /></button></header>
+            <div className="help-modal-scroll">
+              <section className="tutorial-prerequisites"><div className="tutorial-section-icon"><ClipboardCheck /></div><div><h3>开始之前</h3><ul>{selectedHelpTutorial.prerequisites.map((item) => <li key={item}><CheckCircle2 />{item}</li>)}</ul></div></section>
+              {selectedHelpTutorial.sections.map((section, sectionIndex) => <section className="tutorial-section" key={section.title}><div className="tutorial-section-heading"><span>{String(sectionIndex + 1).padStart(2, '0')}</span><div><h3>{section.title}</h3><p>{section.intro}</p></div></div><ol>{section.steps.map((step, stepIndex) => <li key={step.title}><span>{stepIndex + 1}</span><div><b>{step.title}</b><p>{step.detail}</p></div></li>)}</ol></section>)}
+              <section className="tutorial-result"><CheckCircle2 /><div><span>完成标准</span><p>{selectedHelpTutorial.result}</p></div></section>
+              {selectedHelpTutorial.warning && <section className="tutorial-warning"><ShieldAlert /><div><span>重要提醒</span><p>{selectedHelpTutorial.warning}</p></div></section>}
+            </div>
+            <footer className="help-modal-footer"><span>{selectedHelpIndex + 1} / {helpTutorials.length}</span><div><button className="secondary-button" disabled={selectedHelpIndex <= 0} onClick={() => setActiveHelpTopic(helpTutorials[selectedHelpIndex - 1]?.id ?? null)}>上一主题</button>{selectedHelpIndex < helpTutorials.length - 1 ? <button className="primary-button" onClick={() => setActiveHelpTopic(helpTutorials[selectedHelpIndex + 1]?.id ?? null)}>下一主题<ArrowRight /></button> : <button className="primary-button" onClick={() => setActiveHelpTopic(null)}><CheckCircle2 />完成阅读</button>}</div></footer>
+          </div>
+        </section>
+      </div>}
+
       <div className={`drawer-backdrop ${isDrawerOpen ? 'open' : ''}`} onMouseDown={(event) => { if (event.currentTarget === event.target) { setDrawerOpen(false); setDetailSelection(null) } }}>
         <aside className="environment-drawer" role="dialog" aria-modal="true" aria-label="版本详情">
           <header className="drawer-header"><div><span className="eyebrow">VERSION DETAILS</span><h2>版本详情</h2></div><button className="icon-button" onClick={() => { setDrawerOpen(false); setDetailSelection(null) }} aria-label="关闭详情"><X /></button></header>
-          <div className="drawer-scroll"><div className={`drawer-health ${detailHealthy ? 'healthy' : 'warning'}`}><ShieldCheck /><div><b>{detailHealthy ? '版本检查通过' : '版本不可用'}</b><span>{detailIsSteam ? steam?.issue ?? 'Steam 原版、Workshop 与用户目录已识别。' : detailHealthy ? '游戏、缓存和版本路径均可访问。' : '该冻结版本缺少必要的游戏或缓存目录。'}</span></div></div><div className="drawer-version"><div className={`drawer-monogram ${detailIsSteam ? 'steam' : ''}`}>{detailIsSteam ? 'ST' : 'PZ'}</div><div><span>{detailIsSteam ? 'STEAM MANAGED' : 'FROZEN BUILD'}</span><h3>{detailName}</h3><small>版本 {detailTechnicalVersion ?? '未知'} · Build {detailBuildId ?? '—'}</small></div></div><section className="drawer-section"><h4>版本摘要</h4><dl><div><dt>有效模组</dt><dd>{detailIsSteam ? '由 Steam 管理' : detailFrozen?.effectiveModCount ?? '—'}</dd></div><div><dt>Workshop 项目</dt><dd>{detailIsSteam ? steam?.workshopProjectCount ?? '—' : detailFrozen?.workshopProjectCount ?? '—'}</dd></div><div><dt>{detailIsSteam ? '清单更新' : '冻结时间'}</dt><dd>{formatDate(detailIsSteam ? steam?.installedAt : detailFrozen?.created)}</dd></div></dl></section><section className="drawer-section"><h4>文件位置</h4>{detailIsSteam ? <><div className="path-item"><span>Steam 游戏</span><code>{compactPath(steam?.gamePath)}</code></div><div className="path-item"><span>Workshop</span><code>{compactPath(steam?.workshopPath)}</code></div><div className="path-item"><span>用户数据</span><code>{compactPath(steam?.cachePath)}</code></div></> : <><div className="path-item"><span>版本目录</span><code>{compactPath(detailFrozen?.freezeRoot)}</code></div><div className="path-item"><span>冻结游戏</span><code>{compactPath(detailFrozen ? `${detailFrozen.freezeRoot}\\game` : null)}</code></div><div className="path-item"><span>独立缓存</span><code>{compactPath(detailFrozen ? `${detailFrozen.freezeRoot}\\cache` : null)}</code></div><div className="path-item"><span>备份目录</span><code>{compactPath(detailFrozen ? `${detailFrozen.freezeRoot}\\backups` : null)}</code></div></>}</section></div>
+          <div className="drawer-scroll"><div className={`drawer-health ${detailHealthy ? 'healthy' : 'warning'}`}><ShieldCheck /><div><b>{detailHealthy ? '版本检查通过' : '版本不可用'}</b><span>{detailIsSteam ? steam?.issue ?? 'Steam 原版、Workshop 与用户目录已识别。' : detailHealthy ? '游戏、缓存和版本路径均可访问。' : '该冻结版本缺少必要的游戏或缓存目录。'}</span></div></div><div className="drawer-version"><div className={`drawer-monogram ${detailIsSteam ? 'steam' : ''}`}>{detailIsSteam ? 'ST' : 'PZ'}</div><div><span>{detailIsSteam ? 'STEAM MANAGED' : 'FROZEN BUILD'}</span><h3>{detailName}</h3><small>版本 {detailTechnicalVersion ?? '未知'} · Build {detailBuildId ?? '—'}</small></div></div><section className="drawer-section"><h4>版本摘要</h4><dl><div><dt>有效模组</dt><dd>{detailIsSteam ? '由 Steam 管理' : detailFrozen?.effectiveModCount ?? '—'}</dd></div><div><dt>Workshop 项目</dt><dd>{detailIsSteam ? steam?.workshopProjectCount ?? '—' : detailFrozen?.workshopProjectCount ?? '—'}</dd></div><div><dt>{detailIsSteam ? '清单更新' : '冻结时间'}</dt><dd>{formatDate(detailIsSteam ? steam?.installedAt : detailFrozen?.created)}</dd></div></dl></section><section className="drawer-section"><h4>文件位置</h4>{detailIsSteam ? <><div className="path-item"><span>Steam 游戏</span><code>{compactPath(steam?.gamePath)}</code></div><div className="path-item"><span>Workshop</span><code>{compactPath(steam?.workshopPath)}</code></div><div className="path-item"><span>用户数据</span><code>{compactPath(steam?.cachePath)}</code></div></> : <><div className="path-item"><span>版本目录</span><code>{compactPath(detailFrozen?.freezeRoot)}</code></div><div className="path-item"><span>{detailFrozen?.storageMode === 'ThinReference' ? '引用游戏' : '冻结游戏'}</span><code>{compactPath(detailFrozen?.gamePath)}</code></div><div className="path-item"><span>独立缓存</span><code>{compactPath(detailFrozen?.cachePath)}</code></div><div className="path-item"><span>备份目录</span><code>{compactPath(detailFrozen?.backupPath)}</code></div></>}</section></div>
           <footer className="drawer-footer"><button className="secondary-button" disabled={!detailHealthy} onClick={openCurrentVersionPath}><FolderOpen />打开版本目录</button><button className="launch-button compact" disabled={!detailHealthy || isBusy || switchingId !== null} onClick={() => { if (detailIsCurrent) void perform('Launch'); else if (detailIsSteam) void activateSteam(); else if (detailFrozen) void activateVersion(detailFrozen.id) }}>{detailIsCurrent ? <Play fill="currentColor" /> : <RefreshCw />}{detailIsCurrent ? '启动当前版本' : '切换到此版本'}</button></footer>
         </aside>
       </div>
