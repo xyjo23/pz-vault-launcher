@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+import { createReadStream } from 'node:fs'
 import { existsSync, promises as fs } from 'node:fs'
 import path from 'node:path'
 
@@ -8,13 +10,14 @@ import type {
   CompatibilityIssue,
   CompatibilityReport,
   CompatibilitySeverity,
+  AnalysisConfidence,
   FileOverlap,
   FileOverlapClassification,
   GameIdentity
 } from '../shared/types'
 import { readGameIdentity } from './game-identity'
 import { detectSteamInstallation } from './steam-service'
-import { collectLayerFiles, discoverLocalMods, discoverWorkshopMods, gameVersionKey, type ResolvedMod } from './mod-resolver'
+import { collectLayerFiles, discoverLocalMods, discoverWorkshopMods, gameVersionKey, normalizeModId, type ResolvedMod } from './mod-resolver'
 import { getSnapshot } from './vault-service'
 
 type AnalysisSource = {
@@ -26,8 +29,6 @@ type AnalysisSource = {
   buildId: string
   identity: GameIdentity
   outputRoot: string
-  frozenRevision: string | null
-  frozenHash: string | null
 }
 
 const severityRank: Record<CompatibilitySeverity, number> = { blocker: 0, warning: 1, unknown: 2, pass: 3 }
@@ -41,8 +42,22 @@ const issue = (
   title: string,
   summary: string,
   evidence: string[] = [],
-  modIds: string[] = []
-): CompatibilityIssue => ({ id, severity, category, title, summary, evidence, modIds: unique(modIds) })
+  modIds: string[] = [],
+  details: Partial<Pick<CompatibilityIssue, 'confidence' | 'appliesToScope' | 'impact' | 'action' | 'rule'>> = {}
+): CompatibilityIssue => ({
+  id,
+  severity,
+  confidence: details.confidence ?? (severity === 'unknown' ? 'unverified' : severity === 'warning' ? 'inferred' : 'confirmed'),
+  appliesToScope: details.appliesToScope ?? true,
+  category,
+  title,
+  summary,
+  impact: details.impact ?? (severity === 'blocker' ? '当前分析范围内存在明确的运行阻断条件。' : severity === 'warning' ? '这是可确认的异常或有依据的风险，但不等于一定无法运行。' : severity === 'unknown' ? '现有静态证据不足以判断是否会影响运行。' : '在本次扫描范围内没有发现该类问题。'),
+  action: details.action ?? (severity === 'pass' ? '无需处理。' : '查看证据并按报告范围进行人工确认。'),
+  rule: details.rule ?? category.toUpperCase(),
+  evidence,
+  modIds: unique(modIds)
+})
 
 const resolveSource = async (): Promise<AnalysisSource> => {
   const snapshot = await getSnapshot()
@@ -78,9 +93,7 @@ const resolveSource = async (): Promise<AnalysisSource> => {
           `游戏目录：${steam.gamePath}`
         ]
       },
-      outputRoot,
-      frozenRevision: null,
-      frozenHash: null
+      outputRoot
     }
   }
 
@@ -95,9 +108,7 @@ const resolveSource = async (): Promise<AnalysisSource> => {
     workshopPath: null,
     buildId: config.BuildID ?? 'unknown',
     identity,
-    outputRoot: config.ReportPath || path.join(config.FreezeRoot, 'reports'),
-    frozenRevision: config.Revision ?? config.FullVersion?.match(/\b([a-f0-9]{7,40})\b/i)?.[1] ?? null,
-    frozenHash: config.GameJarSHA256 ?? null
+    outputRoot: config.ReportPath || path.join(config.FreezeRoot, 'reports')
   }
 }
 
@@ -118,15 +129,16 @@ const findFiles = async (root: string, fileName: string, maxDepth: number): Prom
 
 const parseSaveMods = async (filePath: string): Promise<string[]> => {
   const raw = await fs.readFile(filePath, 'utf8')
-  return raw.split(/\r?\n/).flatMap((line) => {
+  return unique(raw.split(/\r?\n/).flatMap((line) => {
     const match = line.match(/^\s*mod\s*=\s*(.*?)\s*,?\s*$/i)
-    return match?.[1]?.trim() ? [match[1].trim()] : []
-  })
+    const normalized = match?.[1] ? normalizeModId(match[1]) : ''
+    return normalized ? [normalized] : []
+  }))
 }
 
 const parseIniList = (raw: string, key: string): string[] => {
   const match = raw.match(new RegExp(`^\\s*${key}\\s*=\\s*(.*?)\\s*$`, 'im'))
-  return match?.[1] ? unique(match[1].split(/[;,]/).map((value) => value.trim())) : []
+  return match?.[1] ? unique(match[1].split(/[;,]/).map(normalizeModId).filter(Boolean)) : []
 }
 
 const buildContexts = async (
@@ -215,35 +227,60 @@ const findDependencyCycles = (activeIds: string[], dependencies: Map<string, str
   return cycles.filter((cycle, index) => cycles.findIndex((candidate) => [...candidate].sort().join('|') === [...cycle].sort().join('|')) === index)
 }
 
+const hashFile = (filePath: string): Promise<string> => new Promise((resolve, reject) => {
+  const hash = createHash('sha256')
+  const stream = createReadStream(filePath)
+  stream.on('data', (chunk) => hash.update(chunk))
+  stream.on('error', reject)
+  stream.on('end', () => resolve(hash.digest('hex')))
+})
+
 const analyzeFiles = async (
   mods: ResolvedMod[],
   gamePath: string
-): Promise<{ overlaps: FileOverlap[]; overlapCount: number; baseOverrideCount: number; binaryModIds: string[] }> => {
-  const owners = new Map<string, { displayPath: string; modIds: Set<string> }>()
+): Promise<{ overlaps: FileOverlap[]; overlapCount: number; identicalOverlapCount: number; classificationCounts: Map<FileOverlapClassification, number>; baseOverrideCount: number; binaryModIds: string[] }> => {
+  const owners = new Map<string, { displayPath: string; modIds: Set<string>; files: string[] }>()
   const baseOverrides = new Set<string>()
   const binaryModIds = new Set<string>()
   for (const mod of mods) {
     const modId = mod.record.modId ?? mod.record.name
     const files = await collectLayerFiles(mod.layers)
     for (const [normalized, displayPath] of files) {
-      const owner = owners.get(normalized) ?? { displayPath, modIds: new Set<string>() }
+      const owner = owners.get(normalized) ?? { displayPath, modIds: new Set<string>(), files: [] }
       owner.modIds.add(modId)
+      const effectiveFile = [...mod.layers].reverse().map((layer) => path.join(layer, displayPath)).find((candidate) => existsSync(candidate))
+      if (effectiveFile) owner.files.push(effectiveFile)
       owners.set(normalized, owner)
       if (existsSync(path.join(gamePath, displayPath))) baseOverrides.add(normalized)
       if (classifyFile(displayPath) === 'binary') binaryModIds.add(modId)
     }
   }
-  const allOverlaps = [...owners.values()].filter((owner) => owner.modIds.size > 1).map((owner): FileOverlap => {
-    const classification = classifyFile(owner.displayPath)
-    return {
-      relativePath: owner.displayPath,
-      classification,
-      severity: overlapSeverity(classification),
-      modIds: [...owner.modIds].sort((left, right) => left.localeCompare(right, 'en')),
-      overridesBaseGame: baseOverrides.has(owner.displayPath.toLowerCase())
-    }
-  }).sort((left, right) => severityRank[left.severity] - severityRank[right.severity] || right.modIds.length - left.modIds.length || left.relativePath.localeCompare(right.relativePath, 'en'))
-  return { overlaps: allOverlaps.slice(0, 120), overlapCount: allOverlaps.length, baseOverrideCount: baseOverrides.size, binaryModIds: [...binaryModIds] }
+  const overlapOwners = [...owners.values()].filter((owner) => owner.modIds.size > 1)
+  const allOverlaps: FileOverlap[] = []
+  for (let index = 0; index < overlapOwners.length; index += 16) {
+    allOverlaps.push(...await Promise.all(overlapOwners.slice(index, index + 16).map(async (owner): Promise<FileOverlap> => {
+      const classification = classifyFile(owner.displayPath)
+      let contentIdentical: boolean | null = null
+      try {
+        const hashes = await Promise.all(owner.files.map(hashFile))
+        contentIdentical = hashes.length === owner.modIds.size && new Set(hashes).size === 1
+      } catch {
+        contentIdentical = null
+      }
+      return {
+        relativePath: owner.displayPath,
+        classification,
+        severity: contentIdentical === true ? 'pass' : overlapSeverity(classification),
+        modIds: [...owner.modIds].sort((left, right) => left.localeCompare(right, 'en')),
+        overridesBaseGame: baseOverrides.has(owner.displayPath.toLowerCase()),
+        contentIdentical
+      }
+    })))
+  }
+  allOverlaps.sort((left, right) => severityRank[left.severity] - severityRank[right.severity] || right.modIds.length - left.modIds.length || left.relativePath.localeCompare(right.relativePath, 'en'))
+  const classificationCounts = new Map<FileOverlapClassification, number>()
+  for (const overlap of allOverlaps.filter((entry) => entry.contentIdentical !== true)) classificationCounts.set(overlap.classification, (classificationCounts.get(overlap.classification) ?? 0) + 1)
+  return { overlaps: allOverlaps.slice(0, 120), overlapCount: allOverlaps.length, identicalOverlapCount: allOverlaps.filter((entry) => entry.contentIdentical === true).length, classificationCounts, baseOverrideCount: baseOverrides.size, binaryModIds: [...binaryModIds] }
 }
 
 export const analyzeCompatibility = async (): Promise<CompatibilityReport> => {
@@ -251,20 +288,11 @@ export const analyzeCompatibility = async (): Promise<CompatibilityReport> => {
   const issues: CompatibilityIssue[] = []
 
   if (source.identity.status === 'stale-cache') {
-    issues.push(issue('identity-stale-cache', 'warning', 'identity', '运行缓存版本已过期', '游戏二进制身份与 Zomboid/version.txt 不一致；报告以二进制为准。', source.identity.evidence))
+    issues.push(issue('identity-stale-cache', 'warning', 'identity', '运行缓存版本已过期', '游戏二进制身份与 Zomboid/version.txt 不一致；报告以二进制为准。', source.identity.evidence, [], { confidence: 'confirmed', impact: '如果只看旧缓存会误判版本；本报告没有使用旧缓存作为最终身份。', action: '启动一次当前游戏，让运行缓存刷新；兼容性结论仍以二进制身份为准。', rule: 'GAME-IDENTITY-BINARY-PRECEDENCE' }))
   } else if (source.identity.status === 'cache-only' || source.identity.status === 'unknown') {
-    issues.push(issue('identity-unverified', 'blocker', 'identity', '无法验证游戏二进制身份', '兼容性分析不能只依赖运行缓存，请修复或验证 projectzomboid.jar。', source.identity.evidence))
+    issues.push(issue('identity-unverified', 'unknown', 'identity', '无法验证游戏二进制身份', '兼容性分析不能只依赖运行缓存，请修复或验证 projectzomboid.jar。', source.identity.evidence, [], { confidence: 'unverified', impact: '所有依赖游戏版本的结论都缺少可靠前提；这不等于已经证明游戏损坏。', action: '恢复可读取的 projectzomboid.jar，再重新分析。', rule: 'GAME-IDENTITY-BINARY' }))
   } else {
-    issues.push(issue('identity-verified', 'pass', 'identity', '游戏身份已从二进制确认', `${source.identity.version} · Build ${source.identity.buildId} · revision ${source.identity.revision ?? '未知'}`, source.identity.evidence))
-  }
-
-  if (source.source === 'Frozen') {
-    if (source.frozenRevision && source.identity.revision && source.frozenRevision !== source.identity.revision) {
-      issues.push(issue('frozen-revision-mismatch', 'blocker', 'identity', '冻结元数据与游戏文件不一致', `元数据 revision ${source.frozenRevision}，实际二进制 revision ${source.identity.revision}。`, [source.gamePath]))
-    }
-    if (source.frozenHash && source.identity.jarSha256 && source.frozenHash !== source.identity.jarSha256) {
-      issues.push(issue('frozen-hash-mismatch', 'blocker', 'identity', '冻结核心 JAR 已变化', '记录的 projectzomboid.jar SHA-256 与当前文件不一致。', [source.gamePath]))
-    }
+    issues.push(issue('identity-verified', 'pass', 'identity', '游戏身份已从二进制确认', `${source.identity.version} · Build ${source.identity.buildId} · revision ${source.identity.revision ?? '未知'}`, source.identity.evidence, [], { confidence: 'confirmed', impact: '后续版本目录和版本范围判断使用的是实际游戏文件。', action: '无需处理。', rule: 'GAME-IDENTITY-BINARY' }))
   }
 
   const workshopMods = source.workshopPath ? await discoverWorkshopMods(source.workshopPath, source.identity.version) : []
@@ -276,32 +304,47 @@ export const analyzeCompatibility = async (): Promise<CompatibilityReport> => {
     roots.add(resolved)
     return true
   })
-  const installedIds = new Set(mods.flatMap((mod) => mod.record.modId ? [mod.record.modId] : []))
+  const installedIds = new Set(mods.flatMap((mod) => mod.record.modId && !mod.resolutionIssue ? [mod.record.modId] : []))
   const workshopIds = new Set(mods.flatMap((mod) => mod.record.workshopId ? [mod.record.workshopId] : []))
   const contexts = await buildContexts(source.cachePath, installedIds, workshopIds)
-  const selectedContext = contexts.active ?? contexts.servers[0] ?? null
-  const activeOrder = selectedContext?.modIds ?? []
+  const selectedContext = contexts.active ?? (contexts.servers.length === 1 ? contexts.servers[0] : null)
+  const scopeLabel = selectedContext
+    ? `${selectedContext.kind === 'save' ? '最近修改的存档' : '唯一服务器配置'}：${selectedContext.name}`
+    : contexts.servers.length > 1
+      ? `已安装内容清单（发现 ${contexts.servers.length} 个服务器配置，未擅自选择）`
+      : '已安装内容清单（没有可确认的启用上下文）'
+  const activeOrder = unique(selectedContext?.modIds ?? [])
   const activeSet = new Set(activeOrder)
   for (const mod of mods) mod.record.active = Boolean(mod.record.modId && activeSet.has(mod.record.modId))
 
   if (!selectedContext) {
-    issues.push(issue('context-missing', 'unknown', 'save', '没有找到启用模组上下文', '未找到存档 mods.txt 或服务器配置；文件重叠将按全部已安装 MOD 扫描。', [source.cachePath]))
+    issues.push(issue('context-missing', 'unknown', 'save', '没有唯一的启用模组上下文', contexts.servers.length > 1 ? `发现 ${contexts.servers.length} 个服务器配置，但当前页面没有指定要分析哪一个；本次只分析已安装内容清单。` : '未找到存档 mods.txt 或唯一服务器配置；本次只分析已安装内容清单。', [source.cachePath, ...contexts.servers.map((server) => server.path)], [], { confidence: 'unverified', impact: '无法准确判断哪些 MOD 会同时加载，因此依赖、顺序和文件覆盖结论不代表某个实际存档或服务器。', action: '后续请选择具体存档或服务器配置后重新分析。', rule: 'CONTEXT-EXPLICIT' }))
   } else if (selectedContext.missingModIds.length) {
-    issues.push(issue('active-mods-missing', 'blocker', selectedContext.kind, '启用列表引用了缺失 MOD', `${selectedContext.missingModIds.length} 个 Mod ID 无法在当前内容中解析。`, [selectedContext.path, ...selectedContext.missingModIds], selectedContext.missingModIds))
+    issues.push(issue('active-mods-missing', 'blocker', selectedContext.kind, '当前分析对象引用了缺失 MOD', `${selectedContext.missingModIds.length} 个 Mod ID 在已扫描内容中没有对应目录。`, [selectedContext.path, ...selectedContext.missingModIds], selectedContext.missingModIds, { impact: `“${selectedContext.name}”不能按配置完整加载这些 MOD。`, action: '恢复缺失的 Workshop 项目或本地 MOD；也可以从该存档/服务器配置中移除对应 Mod ID。', rule: 'CONTEXT-MOD-PRESENT' }))
   } else {
-    issues.push(issue('active-mods-resolved', 'pass', selectedContext.kind, '启用列表解析完整', `${activeOrder.length} 个启用 Mod ID 均有本地内容。`, [selectedContext.path]))
+    issues.push(issue('active-mods-resolved', 'pass', selectedContext.kind, '启用列表中的 Mod ID 均可解析', `${activeOrder.length} 个不重复 Mod ID 均在当前内容中找到。`, [selectedContext.path], [], { rule: 'CONTEXT-MOD-PRESENT' }))
   }
 
   for (const server of contexts.servers) {
     if (server.missingModIds.length || server.missingWorkshopIds.length) {
-      issues.push(issue(`server-missing-${server.name}`, 'blocker', 'server', `服务器配置“${server.name}”存在缺失内容`, `缺少 ${server.missingModIds.length} 个 Mod ID、${server.missingWorkshopIds.length} 个 Workshop 项目。`, [server.path, ...server.missingModIds, ...server.missingWorkshopIds], server.missingModIds))
+      const isSelected = selectedContext?.path === server.path
+      issues.push(issue(`server-missing-${server.name}`, isSelected ? 'blocker' : 'warning', 'server', `服务器配置“${server.name}”引用了缺失内容`, `缺少 ${server.missingModIds.length} 个 Mod ID、${server.missingWorkshopIds.length} 个 Workshop 项目。${isSelected ? '' : ' 该配置不属于本次主要分析范围。'}`, [server.path, ...server.missingModIds, ...server.missingWorkshopIds], server.missingModIds, { confidence: 'confirmed', appliesToScope: isSelected, impact: isSelected ? '当前服务器配置不能完整加载。' : '只影响这个服务器配置，不代表当前存档或其他服务器有问题。', action: '恢复对应 Workshop 项目和 Mod ID，或修正该服务器配置。', rule: 'SERVER-CONTENT-PRESENT' }))
     }
   }
 
   const byId = new Map<string, ResolvedMod[]>()
   for (const mod of mods) {
+    if (mod.resolutionIssue) {
+      const isActive = Boolean(mod.record.modId && activeSet.has(mod.record.modId))
+      issues.push(issue(`version-layer-missing-${mod.record.key}`, isActive ? 'blocker' : 'warning', 'version', `没有适用于当前游戏的 MOD 内容层：${mod.record.name}`, mod.resolutionIssue, [mod.record.rootPath, ...mod.record.variants], mod.record.modId ? [mod.record.modId] : [], { confidence: 'confirmed', appliesToScope: isActive || selectedContext === null, impact: isActive ? '当前分析对象要求启用该 Mod ID，但游戏版本目录规则找不到可加载内容。' : '该目录目前不会为当前游戏版本提供有效内容。', action: '安装包含 common 或不高于当前游戏版本的对应版本目录；也可以停用该 Mod ID。', rule: 'B42-COMPATIBLE-LAYER' }))
+      continue
+    }
+    if (mod.metadataError) {
+      const isActive = Boolean(mod.record.modId && activeSet.has(mod.record.modId))
+      issues.push(issue(`metadata-unreadable-${mod.record.key}`, 'unknown', 'version', `无法完整读取 mod.info：${mod.record.name}`, mod.metadataError, [mod.metadataPath ?? mod.record.rootPath], mod.record.modId ? [mod.record.modId] : [], { confidence: 'unverified', appliesToScope: isActive || selectedContext === null, impact: '版本范围、依赖、互斥和加载顺序字段可能没有被完整纳入分析。', action: '检查文件编码、权限和磁盘状态后重新分析。', rule: 'MOD-INFO-READABLE' }))
+    }
     if (!mod.record.modId) {
-      issues.push(issue(`missing-id-${mod.record.key}`, 'warning', 'dependency', `MOD 缺少 id：${mod.record.name}`, '无法参与依赖、存档和服务器 Mod ID 对齐。', [mod.record.rootPath]))
+      issues.push(issue(`missing-id-${mod.record.key}`, 'warning', 'dependency', `MOD 元数据缺少 id：${mod.record.name}`, '没有可用于游戏启用列表的运行时 Mod ID。', [mod.record.rootPath], [], { confidence: 'confirmed', appliesToScope: selectedContext === null, impact: '该目录无法与存档或服务器中的 Mod ID 建立可靠对应。', action: '检查所选 B42 版本目录中的 mod.info 是否完整。', rule: 'MOD-ID-PRESENT' }))
       continue
     }
     const group = byId.get(mod.record.modId) ?? []
@@ -309,19 +352,23 @@ export const analyzeCompatibility = async (): Promise<CompatibilityReport> => {
     byId.set(mod.record.modId, group)
   }
   for (const [modId, group] of byId) {
-    if (group.length > 1) issues.push(issue(`duplicate-${modId}`, 'blocker', 'dependency', `重复 Mod ID：${modId}`, `${group.length} 个目录声明了同一个运行时 Mod ID。`, group.map((mod) => mod.record.rootPath), [modId]))
+    if (group.length > 1) {
+      const isActive = Boolean(selectedContext && activeSet.has(modId))
+      issues.push(issue(`duplicate-${modId}`, isActive ? 'blocker' : 'warning', 'dependency', `多个目录声明同一个 Mod ID：${modId}`, `${group.length} 个目录声明了相同运行时标识。${isActive ? '该 ID 位于当前启用列表中。' : '当前没有证据表明这些目录会同时加载。'}`, group.map((mod) => mod.record.rootPath), [modId], { confidence: 'confirmed', appliesToScope: isActive || selectedContext === null, impact: isActive ? '游戏无法仅凭 Mod ID 明确区分应该加载哪一个目录。' : '如果以后启用该 Mod ID，实际选中的目录可能不明确。', action: '只保留与目标游戏版本对应的一个目录，或核对作者提供的安装说明。', rule: 'MOD-ID-UNIQUE' }))
+    }
   }
 
   for (const mod of mods) {
     const normalizedGroups = new Map<number, string[]>()
     for (const variant of mod.variantKeys) normalizedGroups.set(variant.key, [...(normalizedGroups.get(variant.key) ?? []), variant.name])
     for (const names of normalizedGroups.values()) {
-      if (names.length > 1) issues.push(issue(`variant-ambiguous-${mod.record.key}-${names.join('-')}`, 'warning', 'version', `版本目录选择存在歧义：${mod.record.name}`, `${names.join('、')} 在游戏的 major.minor 规则下属于同一版本级别。`, [mod.record.rootPath], mod.record.modId ? [mod.record.modId] : []))
+      if (names.length > 1) issues.push(issue(`variant-ambiguous-${mod.record.key}-${names.join('-')}`, 'warning', 'version', `同一版本级别存在多个目录：${mod.record.name}`, `${names.join('、')} 都会归入相同的 major.minor 版本级别。`, [mod.record.rootPath], mod.record.modId ? [mod.record.modId] : [], { confidence: 'confirmed', appliesToScope: selectedContext === null || Boolean(mod.record.modId && activeSet.has(mod.record.modId)), impact: '静态分析无法可靠断言游戏最终采用哪一个同级目录。', action: '按照作者说明只保留一个对应目录，或合并为明确的 major.minor 目录。', rule: 'B42-VARIANT-UNIQUE' }))
     }
   }
 
   const versionKey = gameVersionKey(source.identity.version)
-  const chosenMods = activeSet.size ? mods.filter((mod) => mod.record.modId && activeSet.has(mod.record.modId)) : mods
+  const hasSelectedContext = selectedContext !== null
+  const chosenMods = (hasSelectedContext ? mods.filter((mod) => mod.record.modId && activeSet.has(mod.record.modId)) : mods).filter((mod) => !mod.resolutionIssue)
   const chosenById = new Map(chosenMods.flatMap((mod) => mod.record.modId ? [[mod.record.modId, mod] as const] : []))
   const dependencies = new Map<string, string[]>()
   for (const mod of chosenMods) {
@@ -330,18 +377,22 @@ export const analyzeCompatibility = async (): Promise<CompatibilityReport> => {
     dependencies.set(id, mod.record.require)
     const min = mod.record.versionMin ? gameVersionKey(mod.record.versionMin) : -1
     const max = mod.record.versionMax ? gameVersionKey(mod.record.versionMax) : -1
-    if ((min >= 0 && versionKey < min) || (max >= 0 && versionKey > max)) {
-      issues.push(issue(`version-bound-${id}`, 'blocker', 'version', `版本范围不兼容：${id}`, `目标版本 ${source.identity.version}，声明范围 ${mod.record.versionMin ?? '不限'} ～ ${mod.record.versionMax ?? '不限'}。`, [mod.record.rootPath], [id]))
+    if ((mod.record.versionMin && min < 0) || (mod.record.versionMax && max < 0)) {
+      issues.push(issue(`version-bound-invalid-${id}`, 'unknown', 'version', `无法解析 ${id} 的版本范围`, `mod.info 声明为 ${mod.record.versionMin ?? '不限'} ～ ${mod.record.versionMax ?? '不限'}。`, [mod.record.rootPath], [id], { confidence: 'unverified', impact: '无法利用作者声明判断该 MOD 是否支持当前游戏版本。', action: '检查 mod.info 的 versionMin/versionMax 格式，或查阅作者说明。', rule: 'MOD-VERSION-RANGE-PARSEABLE' }))
+    } else if (versionKey < 0) {
+      issues.push(issue(`version-bound-game-unknown-${id}`, 'unknown', 'version', `无法核对 ${id} 的版本范围`, `没有取得可比较的游戏 major.minor 版本。`, [mod.record.rootPath], [id], { confidence: 'unverified', impact: '不能确认作者声明的版本范围是否覆盖当前游戏。', action: '先修复游戏身份识别，再重新分析。', rule: 'GAME-VERSION-PARSEABLE' }))
+    } else if ((min >= 0 && versionKey < min) || (max >= 0 && versionKey > max)) {
+      issues.push(issue(`version-bound-${id}`, 'blocker', 'version', `作者声明的版本范围不包含当前游戏：${id}`, `当前游戏 ${source.identity.version}；mod.info 声明 ${mod.record.versionMin ?? '不限'} ～ ${mod.record.versionMax ?? '不限'}。`, [mod.record.rootPath], [id], { confidence: 'confirmed', impact: '游戏会把该 MOD 视为不适用于当前版本，或该 MOD 可能依赖其他版本的接口。', action: '安装适用于当前游戏版本的 MOD 变体。', rule: 'MOD-VERSION-RANGE' }))
     }
     for (const required of mod.record.require) {
-      if (!activeSet.size ? !chosenById.has(required) : !activeSet.has(required)) {
-        issues.push(issue(`missing-dependency-${id}-${required}`, 'blocker', 'dependency', `缺少依赖：${id} → ${required}`, chosenById.has(required) ? '依赖已安装但未在当前上下文启用。' : '依赖未安装。', [mod.record.rootPath], [id, required]))
+      if (!hasSelectedContext ? !chosenById.has(required) : !activeSet.has(required)) {
+        issues.push(issue(`missing-dependency-${id}-${required}`, 'blocker', 'dependency', `依赖未满足：${id} 需要 ${required}`, chosenById.has(required) ? '依赖目录已安装，但没有出现在当前启用列表中。' : '当前扫描内容中没有找到依赖目录。', [mod.record.rootPath], [id, required], { confidence: 'confirmed', impact: `${id} 不能按 mod.info 声明的前置条件加载。`, action: `安装并启用 ${required}，或停用 ${id}。`, rule: 'MOD-REQUIRE-SATISFIED' }))
       }
     }
   }
 
   for (const cycle of findDependencyCycles([...chosenById.keys()], dependencies)) {
-    issues.push(issue(`dependency-cycle-${cycle.join('-')}`, 'blocker', 'dependency', '检测到循环依赖', cycle.join(' → '), cycle, cycle))
+    issues.push(issue(`dependency-cycle-${cycle.join('-')}`, 'blocker', 'dependency', '依赖关系形成闭环', cycle.join(' → '), cycle, cycle, { confidence: 'confirmed', impact: '这些 MOD 无法形成有效的先后依赖顺序。', action: '更新相关 MOD，或停用闭环中的至少一个 MOD。', rule: 'MOD-DEPENDENCY-ACYCLIC' }))
   }
 
   const activeIndex = new Map(activeOrder.map((id, index) => [id, index]))
@@ -354,18 +405,18 @@ export const analyzeCompatibility = async (): Promise<CompatibilityReport> => {
       const pair = [id, incompatible].sort().join('|')
       if (seenPairs.has(pair)) continue
       seenPairs.add(pair)
-      issues.push(issue(`incompatible-${pair}`, 'blocker', 'conflict', `互斥 MOD 同时启用：${id} / ${incompatible}`, 'mod.info 的 incompatible 规则被命中。', [mod.record.rootPath], [id, incompatible]))
+      issues.push(issue(`incompatible-${pair}`, 'blocker', 'conflict', `作者声明互斥的 MOD 同时启用：${id} / ${incompatible}`, '至少一个 mod.info 明确把另一个 Mod ID 列入 incompatible。', [mod.record.rootPath], [id, incompatible], { confidence: 'confirmed', impact: '这是 MOD 作者提供的明确互斥声明。', action: `在当前配置中只保留 ${id} 或 ${incompatible} 其中一个。`, rule: 'MOD-INCOMPATIBLE' }))
     }
     if (activeSet.size) {
       const current = activeIndex.get(id) ?? -1
       const requiredBefore = unique([...mod.record.require, ...mod.record.loadAfter])
       for (const before of requiredBefore) {
         const target = activeIndex.get(before)
-        if (target !== undefined && target > current) issues.push(issue(`order-after-${id}-${before}`, 'warning', 'load-order', `加载顺序不满足：${id}`, `${id} 应在 ${before} 之后加载。`, [selectedContext!.path], [id, before]))
+        if (target !== undefined && target > current) issues.push(issue(`order-after-${id}-${before}`, 'warning', 'load-order', `启用列表顺序与声明不同：${id}`, `${id} 在列表中位于 ${before} 之前，但 mod.info 要求它在 ${before} 之后。`, [selectedContext!.path], [id, before], { confidence: 'inferred', impact: '游戏可能重排加载顺序；如果没有正确重排，后加载覆盖关系会与作者预期不同。', action: `将 ${before} 放在 ${id} 前面，或按 MOD 作者给出的排序说明调整。`, rule: 'MOD-LOAD-AFTER' }))
       }
       for (const after of mod.record.loadBefore) {
         const target = activeIndex.get(after)
-        if (target !== undefined && target < current) issues.push(issue(`order-before-${id}-${after}`, 'warning', 'load-order', `加载顺序不满足：${id}`, `${id} 应在 ${after} 之前加载。`, [selectedContext!.path], [id, after]))
+        if (target !== undefined && target < current) issues.push(issue(`order-before-${id}-${after}`, 'warning', 'load-order', `启用列表顺序与声明不同：${id}`, `${id} 在列表中位于 ${after} 之后，但 mod.info 要求它在 ${after} 之前。`, [selectedContext!.path], [id, after], { confidence: 'inferred', impact: '游戏可能重排加载顺序；如果没有正确重排，后加载覆盖关系会与作者预期不同。', action: `将 ${id} 放在 ${after} 前面，或按 MOD 作者给出的排序说明调整。`, rule: 'MOD-LOAD-BEFORE' }))
       }
     }
   }
@@ -377,28 +428,45 @@ export const analyzeCompatibility = async (): Promise<CompatibilityReport> => {
     tileNumbers.set(tile.number, owners)
   }
   for (const [number, owners] of tileNumbers) if (owners.size > 1) {
-    issues.push(issue(`tiledef-${number}`, 'blocker', 'conflict', `重复 tiledef 编号：${number}`, `${[...owners].join('、')} 使用相同 tiledef 文件编号。`, [`tiledef=${number}`], [...owners]))
+    issues.push(issue(`tiledef-${number}`, 'blocker', 'conflict', `重复 tiledef 编号：${number}`, `${[...owners].join('、')} 使用相同 tiledef 文件编号。`, [`tiledef=${number}`], [...owners], { confidence: 'confirmed', impact: '游戏无法为两个不同 MOD 同时使用同一个 tiledef 编号，可能导致图块映射错误。', action: '升级相关 MOD，或在当前组合中只保留其中一个；不要自行改号，除非同时重建对应图块资源。', rule: 'TILEDEF-NUMBER-UNIQUE' }))
   }
 
   const files = await analyzeFiles(chosenMods, source.gamePath)
-  const overlapCounts = new Map<FileOverlapClassification, number>()
-  for (const overlap of files.overlaps) overlapCounts.set(overlap.classification, (overlapCounts.get(overlap.classification) ?? 0) + 1)
-  for (const [classification, count] of overlapCounts) {
+  for (const [classification, count] of files.classificationCounts) {
     const severity = overlapSeverity(classification)
     if (severity === 'pass') continue
-    issues.push(issue(`overlaps-${classification}`, severity, classification === 'binary' ? 'security' : 'files', `${classification} 文件存在同路径覆盖`, `报告中保留前 120 条证据；当前分类至少 ${count} 条。`, files.overlaps.filter((overlap) => overlap.classification === classification).slice(0, 8).map((overlap) => `${overlap.relativePath} ← ${overlap.modIds.join(', ')}`), unique(files.overlaps.filter((overlap) => overlap.classification === classification).flatMap((overlap) => overlap.modIds))))
+    const examples = files.overlaps.filter((overlap) => overlap.classification === classification && overlap.contentIdentical !== true).slice(0, 8)
+    issues.push(issue(`overlaps-${classification}`, severity, classification === 'binary' ? 'security' : 'files', `${count} 个 ${classification} 路径由多个 MOD 提供不同内容`, '已确认路径相同且文件哈希不同；静态扫描不能仅凭这一事实断言运行时一定冲突。', examples.map((overlap) => `${overlap.relativePath} ← ${overlap.modIds.join(', ')}`), unique(examples.flatMap((overlap) => overlap.modIds)), { confidence: 'inferred', impact: classification === 'asset' ? '加载顺序会决定最终显示的资源，可能只是外观覆盖。' : classification === 'lua' ? 'Lua 的实际影响取决于运行时事件、模块和函数实现，需要进一步语义分析。' : '后加载内容可能替代先加载内容，是否有害取决于文件语义。', action: '先查看示例路径和涉及 MOD；只有出现运行症状或作者明确说明时才判定为真实冲突。', rule: `FILE-OVERLAP-${classification.toUpperCase()}` }))
   }
-  if (files.baseOverrideCount) issues.push(issue('base-overrides', 'unknown', 'files', 'MOD 覆盖原版路径', `${files.baseOverrideCount} 个有效文件路径与原版游戏重合，需要结合版本 API 与内容差异继续验证。`, [source.gamePath]))
-  if (files.binaryModIds.length) issues.push(issue('binary-mods', 'unknown', 'security', '检测到 Java/本地二进制 MOD', '二进制扩展依赖精确游戏 revision，且需要单独进行来源与安全验证。', files.binaryModIds, files.binaryModIds))
-  if (!issues.some((entry) => entry.category === 'dependency' && entry.severity === 'blocker')) issues.push(issue('dependency-pass', 'pass', 'dependency', '依赖图未发现阻断项', '未发现缺失依赖、循环依赖或重复 Mod ID。'))
-  if (!issues.some((entry) => entry.id.startsWith('tiledef-'))) issues.push(issue('tiledef-pass', 'pass', 'conflict', 'tiledef 编号未发现重复', `检查了 ${tileNumbers.size} 个有效编号。`))
+  if (files.identicalOverlapCount) issues.push(issue('identical-overlaps', 'pass', 'files', '同路径但内容完全相同的文件已排除风险', `${files.identicalOverlapCount} 个重叠路径的 SHA-256 完全一致，没有作为冲突报告。`, [], [], { confidence: 'confirmed', rule: 'FILE-OVERLAP-HASH-EQUALITY' }))
+  if (files.baseOverrideCount) issues.push(issue('base-overrides', 'unknown', 'files', '检测到 MOD 使用了原版已有路径', `${files.baseOverrideCount} 个有效路径同时存在于游戏目录；这只是覆盖事实，不足以证明不兼容。`, [source.gamePath], [], { confidence: 'confirmed', impact: '可能是有意修改原版资源，也可能在游戏更新后需要适配。', action: '结合具体路径、MOD 说明和实际运行日志判断；不要仅凭数量删除 MOD。', rule: 'BASE-PATH-OVERRIDE' }))
+  if (files.binaryModIds.length) issues.push(issue('binary-mods', 'unknown', 'security', '检测到 Java 或本地二进制扩展', '这类扩展可以直接影响游戏代码，静态文件扫描不能证明其安全性或兼容性。', files.binaryModIds, files.binaryModIds, { confidence: 'unverified', impact: '它们可能随游戏 revision 变化而失效，也具备普通 Lua MOD 之外的系统权限风险。', action: '只使用可信来源、优先选择可复现或开源构建，并在每次游戏更新后单独验证。', rule: 'BINARY-MOD-MANUAL-TRUST' }))
+  const contentCoverageComplete = !selectedContext || (selectedContext.missingModIds.length === 0 && selectedContext.missingWorkshopIds.length === 0)
+  if (!issues.some((entry) => entry.appliesToScope && entry.category === 'dependency' && entry.severity === 'blocker')) {
+    issues.push(contentCoverageComplete
+      ? issue('dependency-pass', 'pass', 'dependency', '当前分析范围的依赖图没有阻断项', '未发现缺失依赖、循环依赖或正在启用的重复 Mod ID。', [], [], { rule: 'DEPENDENCY-GRAPH-COMPLETE' })
+      : issue('dependency-coverage-incomplete', 'unknown', 'dependency', '依赖图只覆盖了当前能找到的 MOD', `${selectedContext!.missingModIds.length} 个缺失 Mod ID 没有 mod.info，无法检查它们自己的依赖、互斥和加载顺序。`, [selectedContext!.path], selectedContext!.missingModIds, { confidence: 'unverified', impact: '“没有发现额外依赖错误”不能解释为整个启用列表已经通过。', action: '先恢复缺失 MOD，再重新运行兼容性分析。', rule: 'DEPENDENCY-GRAPH-COVERAGE' }))
+  }
+  if (!issues.some((entry) => entry.id.startsWith('tiledef-'))) {
+    issues.push(contentCoverageComplete
+      ? issue('tiledef-pass', 'pass', 'conflict', 'tiledef 编号未发现重复', `检查了 ${tileNumbers.size} 个有效编号。`, [], [], { rule: 'TILEDEF-NUMBER-UNIQUE' })
+      : issue('tiledef-coverage-incomplete', 'unknown', 'conflict', 'tiledef 检查没有覆盖缺失 MOD', `已检查当前可读取的 ${tileNumbers.size} 个编号；缺失 MOD 的编号未知。`, [selectedContext!.path], selectedContext!.missingModIds, { confidence: 'unverified', impact: '当前结果不能排除缺失 MOD 恢复后出现 tiledef 编号重复。', action: '恢复缺失 MOD 后重新分析。', rule: 'TILEDEF-COVERAGE' }))
+  }
 
   issues.sort((left, right) => severityRank[left.severity] - severityRank[right.severity] || left.title.localeCompare(right.title, 'zh-CN'))
-  const blockers = issues.filter((entry) => entry.severity === 'blocker').length
-  const warnings = issues.filter((entry) => entry.severity === 'warning').length
-  const unknowns = issues.filter((entry) => entry.severity === 'unknown').length
-  const passes = issues.filter((entry) => entry.severity === 'pass').length
+  const scopedIssues = issues.filter((entry) => entry.appliesToScope)
+  const blockers = scopedIssues.filter((entry) => entry.severity === 'blocker').length
+  const warnings = scopedIssues.filter((entry) => entry.severity === 'warning').length
+  const unknowns = scopedIssues.filter((entry) => entry.severity === 'unknown').length
+  const passes = scopedIssues.filter((entry) => entry.severity === 'pass').length
   const verdict: CompatibilitySeverity = blockers ? 'blocker' : warnings ? 'warning' : unknowns ? 'unknown' : 'pass'
+  const plainSummary = blockers
+    ? `针对“${scopeLabel}”发现 ${blockers} 个有直接证据的阻断项；处理后才能按该配置完整加载。`
+    : warnings
+      ? `针对“${scopeLabel}”没有发现明确阻断，但有 ${warnings} 项需要核对。`
+      : unknowns
+        ? `针对“${scopeLabel}”没有发现明确阻断，但仍有 ${unknowns} 项缺少足够证据。`
+        : `针对“${scopeLabel}”的已实现规则均已通过；这不等于能够证明所有运行时行为绝对兼容。`
   await fs.mkdir(source.outputRoot, { recursive: true })
   const reportPath = path.join(source.outputRoot, `latest-${source.source.toLowerCase()}.json`)
   const report: CompatibilityReport = {
@@ -406,9 +474,23 @@ export const analyzeCompatibility = async (): Promise<CompatibilityReport> => {
     generatedAt: new Date().toISOString(),
     source: source.source,
     sourceLabel: source.label,
+    scopeLabel,
+    plainSummary,
     reportPath,
     identity: source.identity,
     verdict,
+    methodology: [
+      '从游戏二进制读取实际版本身份，并按 major.minor 选择 B42 MOD 版本目录。',
+      '解析 mod.info 的 Mod ID、版本范围、require、incompatible、loadAfter 和 loadBefore。',
+      '只对当前分析范围内的 MOD 建立依赖图和加载顺序。',
+      '对同路径文件计算 SHA-256；内容完全相同的重叠不会作为风险报告。'
+    ],
+    limitations: [
+      selectedContext ? `本报告的主要结论只适用于“${scopeLabel}”。` : '没有唯一启用上下文，因此依赖和覆盖分析只能描述已安装内容，不能代表某个实际存档或服务器。',
+      ...(selectedContext?.missingModIds.length ? [`${selectedContext.missingModIds.length} 个缺失 Mod ID 没有文件可供解析；它们的依赖、互斥、tiledef 和文件覆盖不在已完成扫描内。`] : []),
+      '静态分析不能执行 Lua、Java 或本地二进制代码，也不能证明所有运行时行为兼容。',
+      '“同路径且内容不同”是覆盖事实，不等于已经证明发生功能冲突。'
+    ],
     summary: {
       installedMods: mods.length,
       activeMods: activeOrder.length,
@@ -418,8 +500,10 @@ export const analyzeCompatibility = async (): Promise<CompatibilityReport> => {
       unknowns,
       passes,
       overlapPaths: files.overlapCount,
+      identicalOverlapPaths: files.identicalOverlapCount,
       baseGameOverrides: files.baseOverrideCount
     },
+    analysisContext: selectedContext,
     activeContext: contexts.active,
     serverContexts: contexts.servers,
     issues,

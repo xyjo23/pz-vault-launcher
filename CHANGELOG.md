@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.0-preview - 2026-11-24
+
+- Added the `.pzshare` v1 workflow for creating, inspecting and installing auditable shared version manifests without embedding game, MOD, save or account data.
+- Added strict schema validation, canonical SHA-256 package digests, per-MOD directory fingerprints and exact reconstruction matching for game identity, Workshop IDs, Mod IDs and load order.
+- Added post-install verification and a fail-closed quarantine state that prevents mismatched shared versions from being activated or launched.
+- Added read-only integrity checks for shared-package operations so inspecting a package never starts Steam file validation.
+- Separated Integrity and Compatibility workspaces with clearer evidence levels and plain-language reports.
+- Unified Steam, managed and imported versions in the global version registry and kept Steam visually consistent with frozen versions.
+- Added automated shared-package format, fingerprint, matching and end-to-end round-trip tests.
+
 ## 0.7.1-preview - 2026-11-23
 
 - Allowed Quick Thin Version creation when a save or server context references already-missing Mod IDs; the analysis report keeps the missing evidence while the migration links every currently installed MOD.

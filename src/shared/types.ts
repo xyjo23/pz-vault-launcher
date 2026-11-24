@@ -122,6 +122,9 @@ export type FreezeConfig = {
   MigrationMode?: MigrationMode
   MutableCachePolicyVersion?: number
   ReferencedMods?: ReferencedModRoot[]
+  ShareInstallStatus?: 'Verified' | 'Quarantined'
+  SharePackageID?: string
+  SharePackageDigest?: string
 }
 
 export type FreezeVersionSummary = {
@@ -138,8 +141,124 @@ export type FreezeVersionSummary = {
   workshopProjectCount?: number
   effectiveModCount?: number
   storageMode?: FreezeStorageMode
+  origin: 'Managed' | 'External'
+  managerRoot?: string
+  registeredAt?: string
+  shareInstallStatus?: 'Verified' | 'Quarantined'
   isActive: boolean
   isHealthy: boolean
+}
+
+export type VersionImportResult = {
+  canceled: boolean
+  imported: number
+  skipped: number
+  message: string
+}
+
+export type SharePackageMod = {
+  name: string
+  modId: string
+  workshopId: string | null
+  source: 'Workshop' | 'Local'
+  selectedVersion: string | null
+  variants: string[]
+  require: string[]
+  incompatible: string[]
+  loadAfter: string[]
+  loadBefore: string[]
+  contentFingerprint: string
+  files: number
+  bytes: number
+  delivery: 'steam-workshop-reference' | 'local-reference'
+  embedded: false
+}
+
+export type SharePackageManifestV1 = {
+  packageId: string
+  createdAt: string
+  producer: { name: 'Project Zomboid Vault'; version: string }
+  title: string
+  source: 'Steam' | 'Frozen'
+  game: {
+    appId: '108600'
+    version: string
+    fullVersion: string
+    buildId: string
+    revision: string | null
+    jarSha256: string | null
+    identityStatus: GameIdentityStatus
+  }
+  loadout: {
+    contextKind: 'save' | 'server'
+    contextName: string
+    modIds: string[]
+    workshopIds: string[]
+  }
+  mods: SharePackageMod[]
+  analysis: {
+    integrityVerdict: CompatibilitySeverity
+    compatibilityVerdict: CompatibilitySeverity
+    integritySummary: string
+    compatibilitySummary: string
+    warnings: string[]
+  }
+  rights: {
+    policy: 'reference-only-v1'
+    embeddedFiles: 0
+    statement: string
+  }
+  exclusions: string[]
+}
+
+export type SharePackageEnvelopeV1 = {
+  format: 'pz-vault-share'
+  schemaVersion: 1
+  manifest: SharePackageManifestV1
+  integrity: { algorithm: 'SHA-256'; digest: string }
+  signature: { status: 'unsigned'; reason: string }
+}
+
+export type SharePackageFinding = {
+  severity: 'blocker' | 'warning' | 'pass'
+  title: string
+  detail: string
+}
+
+export type SharePackageCreateResult = {
+  canceled: boolean
+  ok: boolean
+  filePath: string | null
+  packageId: string | null
+  digest: string | null
+  message: string
+}
+
+export type SharePackageInspection = {
+  canceled: boolean
+  valid: boolean
+  canInstall: boolean
+  filePath: string | null
+  packageId: string | null
+  title: string | null
+  createdAt: string | null
+  source: 'Steam' | 'Frozen' | null
+  gameVersion: string | null
+  buildId: string | null
+  modCount: number
+  workshopCount: number
+  digest: string | null
+  trust: 'unsigned' | 'invalid'
+  rights: 'reference-only' | 'unknown'
+  findings: SharePackageFinding[]
+  message: string
+}
+
+export type SharePackageInstallResult = {
+  ok: boolean
+  message: string
+  output: string
+  installedRoot: string | null
 }
 
 export type LauncherSnapshot = {
@@ -170,13 +289,56 @@ export type ModSummary = {
 }
 
 export type CompatibilitySeverity = 'blocker' | 'warning' | 'unknown' | 'pass'
+export type AnalysisConfidence = 'confirmed' | 'inferred' | 'unverified'
+
+export type IntegrityFinding = {
+  id: string
+  severity: CompatibilitySeverity
+  confidence: AnalysisConfidence
+  category: 'identity' | 'baseline' | 'game' | 'mods' | 'reference' | 'external'
+  title: string
+  summary: string
+  impact: string
+  action: string
+  rule: string
+  evidence: string[]
+}
+
+export type IntegrityReport = {
+  schemaVersion: 1
+  generatedAt: string
+  source: 'Steam' | 'Frozen'
+  sourceLabel: string
+  plainSummary: string
+  reportPath: string | null
+  verdict: CompatibilitySeverity
+  storageMode?: FreezeStorageMode
+  methodology: string[]
+  limitations: string[]
+  summary: {
+    checkedFiles: number
+    missingFiles: number
+    changedFiles: number
+    addedFiles: number
+    unreadableFiles: number
+    brokenReferences: number
+    findings: number
+  }
+  findings: IntegrityFinding[]
+  rawOutput: string
+}
 
 export type CompatibilityIssue = {
   id: string
   severity: CompatibilitySeverity
+  confidence: AnalysisConfidence
+  appliesToScope: boolean
   category: 'identity' | 'version' | 'dependency' | 'load-order' | 'conflict' | 'files' | 'save' | 'server' | 'security'
   title: string
   summary: string
+  impact: string
+  action: string
+  rule: string
   evidence: string[]
   modIds: string[]
 }
@@ -217,6 +379,7 @@ export type FileOverlap = {
   severity: CompatibilitySeverity
   modIds: string[]
   overridesBaseGame: boolean
+  contentIdentical: boolean | null
 }
 
 export type CompatibilityReport = {
@@ -224,9 +387,13 @@ export type CompatibilityReport = {
   generatedAt: string
   source: 'Steam' | 'Frozen'
   sourceLabel: string
+  scopeLabel: string
+  plainSummary: string
   reportPath: string | null
   identity: GameIdentity
   verdict: CompatibilitySeverity
+  methodology: string[]
+  limitations: string[]
   summary: {
     installedMods: number
     activeMods: number
@@ -236,8 +403,10 @@ export type CompatibilityReport = {
     unknowns: number
     passes: number
     overlapPaths: number
+    identicalOverlapPaths: number
     baseGameOverrides: number
   }
+  analysisContext: CompatibilityContext | null
   activeContext: CompatibilityContext | null
   serverContexts: CompatibilityContext[]
   issues: CompatibilityIssue[]
@@ -252,8 +421,13 @@ export type VaultApi = {
   validateSteam: () => Promise<boolean>
   openPath: (targetPath: string) => Promise<boolean>
   listCurrentMods: () => Promise<ModSummary[]>
+  analyzeIntegrity: () => Promise<IntegrityReport>
   analyzeCompatibility: () => Promise<CompatibilityReport>
   listVersions: () => Promise<FreezeVersionSummary[]>
+  importVersion: () => Promise<VersionImportResult>
+  createSharePackage: () => Promise<SharePackageCreateResult>
+  inspectSharePackage: () => Promise<SharePackageInspection>
+  installSharePackage: (filePath: string) => Promise<SharePackageInstallResult>
   activateVersion: (versionId: string) => Promise<LauncherSnapshot>
   activateSteam: () => Promise<LauncherSnapshot>
   previewMigration: (request: MigrationRequest) => Promise<MigrationPreview>

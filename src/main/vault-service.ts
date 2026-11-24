@@ -6,7 +6,7 @@ import path from 'node:path'
 
 import { app, dialog, shell } from 'electron'
 
-import type { ActionResult, FreezeConfig, FreezeVersionSummary, LauncherAction, LauncherSnapshot, ModSummary } from '../shared/types'
+import type { ActionResult, FreezeConfig, FreezeVersionSummary, LauncherAction, LauncherSnapshot, ModSummary, VersionImportResult } from '../shared/types'
 import { readGameIdentity } from './game-identity'
 import { discoverLocalMods, discoverWorkshopMods, toModSummaries } from './mod-resolver'
 import { detectSteamInstallation, launchSteamGame, validateSteamGame } from './steam-service'
@@ -14,31 +14,105 @@ import { detectSteamInstallation, launchSteamGame, validateSteamGame } from './s
 const ACTIONS: ReadonlySet<LauncherAction> = new Set(['Launch', 'Verify', 'BackupSave'])
 
 const getSettingsPath = (): string => path.join(app.getPath('userData'), 'launcher-settings.json')
+const getRegistryPath = (): string => path.join(app.getPath('userData'), 'version-registry.json')
 
-type LauncherSettings = { managerRoot: string | null; activeSource: 'Steam' | 'Frozen' }
+type LauncherSettings = { managerRoot: string | null; activeSource: 'Steam' | 'Frozen'; activeVersionRoot: string | null }
+type VersionRegistration = {
+  id: string
+  freezeRoot: string
+  origin: 'Managed' | 'External'
+  managerRoot?: string
+  registeredAt: string
+}
+type VersionRegistry = { schemaVersion: 1; managerRoots: string[]; versions: VersionRegistration[] }
+
+const emptyRegistry = (): VersionRegistry => ({ schemaVersion: 1, managerRoots: [], versions: [] })
+const normalizeRoot = (value: string): string => path.resolve(value).replace(/[\\/]+$/, '')
+const rootKey = (value: string): string => normalizeRoot(value).toLowerCase()
+const registrationId = (freezeRoot: string): string => `frozen-${createHash('sha256').update(rootKey(freezeRoot), 'utf8').digest('hex').slice(0, 16)}`
 
 const readSettings = async (): Promise<LauncherSettings> => {
   try {
     const raw = await fs.readFile(getSettingsPath(), 'utf8')
-    const parsed = JSON.parse(raw) as { managerRoot?: unknown }
+    const parsed = JSON.parse(raw) as { managerRoot?: unknown; activeSource?: unknown; activeVersionRoot?: unknown }
     const managerRoot = typeof parsed.managerRoot === 'string' ? parsed.managerRoot : null
-    const activeSource = (parsed as { activeSource?: unknown }).activeSource === 'Steam' ? 'Steam' : managerRoot ? 'Frozen' : 'Steam'
-    return { managerRoot, activeSource }
+    const activeVersionRoot = typeof parsed.activeVersionRoot === 'string' ? parsed.activeVersionRoot : null
+    const activeSource = parsed.activeSource === 'Steam' ? 'Steam' : activeVersionRoot || managerRoot ? 'Frozen' : 'Steam'
+    return { managerRoot, activeSource, activeVersionRoot }
   } catch {
-    return { managerRoot: null, activeSource: 'Steam' }
+    return { managerRoot: null, activeSource: 'Steam', activeVersionRoot: null }
   }
+}
+
+const saveSettings = async (settings: LauncherSettings): Promise<void> => {
+  await fs.mkdir(path.dirname(getSettingsPath()), { recursive: true })
+  await fs.writeFile(getSettingsPath(), JSON.stringify(settings, null, 2), 'utf8')
 }
 
 const saveManagerRoot = async (managerRoot: string): Promise<void> => {
   const settings = await readSettings()
-  await fs.mkdir(path.dirname(getSettingsPath()), { recursive: true })
-  await fs.writeFile(getSettingsPath(), JSON.stringify({ ...settings, managerRoot }, null, 2), 'utf8')
+  await saveSettings({ ...settings, managerRoot })
 }
 
-const saveActiveSource = async (activeSource: LauncherSettings['activeSource']): Promise<void> => {
+const saveActiveSource = async (activeSource: LauncherSettings['activeSource'], activeVersionRoot?: string): Promise<void> => {
   const settings = await readSettings()
-  await fs.mkdir(path.dirname(getSettingsPath()), { recursive: true })
-  await fs.writeFile(getSettingsPath(), JSON.stringify({ ...settings, activeSource }, null, 2), 'utf8')
+  await saveSettings({ ...settings, activeSource, activeVersionRoot: activeVersionRoot ? normalizeRoot(activeVersionRoot) : settings.activeVersionRoot })
+}
+
+const readRegistry = async (): Promise<VersionRegistry> => {
+  try {
+    const parsed = parseJson<Partial<VersionRegistry>>(await fs.readFile(getRegistryPath(), 'utf8'))
+    const managerRoots = Array.isArray(parsed.managerRoots) ? parsed.managerRoots.filter((value): value is string => typeof value === 'string') : []
+    const versions = Array.isArray(parsed.versions) ? parsed.versions.filter((value): value is VersionRegistration => (
+      Boolean(value) && typeof value.id === 'string' && typeof value.freezeRoot === 'string' &&
+      (value.origin === 'Managed' || value.origin === 'External') && typeof value.registeredAt === 'string'
+    )) : []
+    return { schemaVersion: 1, managerRoots, versions }
+  } catch {
+    return emptyRegistry()
+  }
+}
+
+const saveRegistry = async (registry: VersionRegistry): Promise<void> => {
+  await fs.mkdir(path.dirname(getRegistryPath()), { recursive: true })
+  await fs.writeFile(getRegistryPath(), JSON.stringify(registry, null, 2), 'utf8')
+}
+
+const addManagerRoot = (registry: VersionRegistry, managerRoot: string): boolean => {
+  const normalized = normalizeRoot(managerRoot)
+  if (registry.managerRoots.some((candidate) => rootKey(candidate) === rootKey(normalized))) return false
+  registry.managerRoots.push(normalized)
+  return true
+}
+
+const registerRoot = (
+  registry: VersionRegistry,
+  freezeRoot: string,
+  origin: VersionRegistration['origin'],
+  managerRoot?: string
+): boolean => {
+  const normalized = normalizeRoot(freezeRoot)
+  const existing = registry.versions.find((candidate) => rootKey(candidate.freezeRoot) === rootKey(normalized))
+  if (existing) {
+    let changed = false
+    if (origin === 'Managed' && existing.origin !== 'Managed') {
+      existing.origin = 'Managed'
+      changed = true
+    }
+    if (managerRoot && (!existing.managerRoot || rootKey(existing.managerRoot) !== rootKey(managerRoot))) {
+      existing.managerRoot = normalizeRoot(managerRoot)
+      changed = true
+    }
+    return changed
+  }
+  registry.versions.push({
+    id: registrationId(normalized),
+    freezeRoot: normalized,
+    origin,
+    managerRoot: managerRoot ? normalizeRoot(managerRoot) : undefined,
+    registeredAt: new Date().toISOString()
+  })
+  return true
 }
 
 const parseJson = <T>(raw: string): T => JSON.parse(raw.replace(/^\uFEFF/, '')) as T
@@ -54,11 +128,107 @@ const thinDependencyIssue = (config: FreezeConfig): string | null => {
   return missing ? `薄版本 MOD 引用不存在：${missing.name}` : null
 }
 
+const quarantineIssue = (config: FreezeConfig): string | null => (
+  config.ShareInstallStatus === 'Quarantined'
+    ? '该共享版本的安装后指纹复核未通过，已被隔离并禁止启动。请重新接收原共享包或删除此测试版本。'
+    : null
+)
+
 const effectiveModCount = (config: FreezeConfig): number | undefined => (
   config.StorageMode === 'ThinReference' && config.ReferencedMods
     ? new Set(config.ReferencedMods.flatMap((mod) => mod.modIds)).size
     : config.EffectiveModCount
 )
+
+const discoverManagerRoots = async (managerRoot: string): Promise<string[]> => {
+  const frozenRoot = path.join(managerRoot, 'frozen')
+  try {
+    const entries = await fs.readdir(frozenRoot, { withFileTypes: true })
+    return entries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => path.join(frozenRoot, entry.name))
+      .filter((freezeRoot) => existsSync(path.join(freezeRoot, 'metadata', 'freeze.json')))
+  } catch {
+    return []
+  }
+}
+
+const legacyActiveRoot = async (managerRoot: string | null): Promise<string | null> => {
+  if (!managerRoot) return null
+  try {
+    const config = parseJson<FreezeConfig>(await fs.readFile(path.join(managerRoot, 'current-freeze.json'), 'utf8'))
+    return config.FreezeRoot ? normalizeRoot(config.FreezeRoot) : null
+  } catch {
+    return null
+  }
+}
+
+const syncRegistry = async (): Promise<{ registry: VersionRegistry; settings: LauncherSettings; activeRoot: string | null }> => {
+  const settings = await readSettings()
+  const registry = await readRegistry()
+  let changed = false
+  if (settings.managerRoot) changed = addManagerRoot(registry, settings.managerRoot) || changed
+
+  const activeRoot = settings.activeVersionRoot ?? await legacyActiveRoot(settings.managerRoot)
+  if (activeRoot) {
+    let owningRoot = settings.managerRoot && rootKey(activeRoot).startsWith(`${rootKey(path.join(settings.managerRoot, 'frozen'))}\\`)
+      ? settings.managerRoot
+      : undefined
+    try {
+      const activeConfig = parseJson<FreezeConfig>(await fs.readFile(path.join(activeRoot, 'metadata', 'freeze.json'), 'utf8'))
+      if (activeConfig.ManagerRoot && rootKey(activeRoot).startsWith(`${rootKey(path.join(activeConfig.ManagerRoot, 'frozen'))}\\`)) {
+        owningRoot = activeConfig.ManagerRoot
+        changed = addManagerRoot(registry, owningRoot) || changed
+      }
+    } catch {
+      // Keep the registration visible even when its metadata is temporarily unavailable.
+    }
+    changed = registerRoot(registry, activeRoot, owningRoot ? 'Managed' : 'External', owningRoot) || changed
+  }
+
+  for (const managerRoot of registry.managerRoots) {
+    for (const freezeRoot of await discoverManagerRoots(managerRoot)) {
+      changed = registerRoot(registry, freezeRoot, 'Managed', managerRoot) || changed
+    }
+  }
+
+  if (changed) await saveRegistry(registry)
+  if (!settings.activeVersionRoot && activeRoot) await saveSettings({ ...settings, activeVersionRoot: activeRoot })
+  return { registry, settings: { ...settings, activeVersionRoot: settings.activeVersionRoot ?? activeRoot }, activeRoot }
+}
+
+const normalizedVersionConfig = (config: FreezeConfig, freezeRoot: string): FreezeConfig => {
+  const gamePath = config.StorageMode === 'ThinReference' ? config.GamePath : path.join(freezeRoot, 'game')
+  const cachePath = config.StorageMode === 'ThinReference' ? config.CachePath : path.join(freezeRoot, 'cache')
+  return {
+    ...config,
+    FreezeRoot: freezeRoot,
+    GamePath: gamePath,
+    CachePath: cachePath,
+    ManifestPath: config.ManifestPath || path.join(freezeRoot, 'manifests'),
+    ReportPath: config.ReportPath || path.join(freezeRoot, 'reports'),
+    BackupPath: config.BackupPath || path.join(freezeRoot, 'backups'),
+    EffectiveModCount: effectiveModCount(config),
+    LaunchArguments: (config.LaunchArguments ?? ['-nosteam', `-cachedir=${cachePath}`]).map((argument) =>
+      argument.startsWith('-cachedir=') ? `-cachedir=${cachePath}` : argument
+    )
+  }
+}
+
+const readActiveConfig = async (settings: LauncherSettings): Promise<{ config: FreezeConfig; configPath: string } | null> => {
+  const activeRoot = settings.activeVersionRoot ?? await legacyActiveRoot(settings.managerRoot)
+  const metadataPath = activeRoot ? path.join(activeRoot, 'metadata', 'freeze.json') : null
+  if (metadataPath && existsSync(metadataPath)) {
+    const config = parseJson<FreezeConfig>(await fs.readFile(metadataPath, 'utf8'))
+    return { config: normalizedVersionConfig(config, normalizeRoot(activeRoot!)), configPath: metadataPath }
+  }
+  if (!settings.managerRoot) return null
+  const currentPath = path.join(settings.managerRoot, 'current-freeze.json')
+  if (!existsSync(currentPath)) return null
+  const config = parseJson<FreezeConfig>(await fs.readFile(currentPath, 'utf8'))
+  const freezeRoot = normalizeRoot(config.FreezeRoot)
+  return { config: normalizedVersionConfig(config, freezeRoot), configPath: currentPath }
+}
 
 export const listCurrentMods = async (): Promise<ModSummary[]> => {
   const snapshot = await getSnapshot()
@@ -94,29 +264,28 @@ const getLastBackup = async (
 }
 
 export const getSnapshot = async (): Promise<LauncherSnapshot> => {
-  const { managerRoot, activeSource } = await readSettings()
-  if (!managerRoot) {
-    return {
-      activeSource,
-      isConfigured: false,
-      isHealthy: false,
-      managerRoot: null,
-      enginePath: null,
-      config: null,
-      lastBackup: null,
-      issue: null
-    }
-  }
-
-  const configPath = path.join(managerRoot, 'current-freeze.json')
-  const enginePath = path.join(managerRoot, 'tools', 'PZ-Freeze-Manager.ps1')
-
+  const settings = await readSettings()
+  const { managerRoot, activeSource } = settings
   try {
-    const config = parseJson<FreezeConfig>(await fs.readFile(configPath, 'utf8'))
-    config.EffectiveModCount = effectiveModCount(config)
+    const active = await readActiveConfig(settings)
+    const config = active?.config ?? null
+    const engineRoot = config?.ManagerRoot || managerRoot
+    const enginePath = engineRoot ? path.join(engineRoot, 'tools', 'PZ-Freeze-Manager.ps1') : null
+    if (!config) {
+      return {
+        activeSource,
+        isConfigured: Boolean(managerRoot),
+        isHealthy: activeSource === 'Steam',
+        managerRoot,
+        enginePath,
+        config: null,
+        lastBackup: null,
+        issue: managerRoot ? '版本库已就绪，尚未创建或选择受管版本。' : null
+      }
+    }
     const requiredPaths = [config.FreezeRoot, config.GamePath, config.CachePath]
     const missingPath = requiredPaths.find((candidate) => !candidate || !existsSync(candidate))
-    const dependencyIssue = missingPath ? null : thinDependencyIssue(config)
+    const dependencyIssue = missingPath ? null : (quarantineIssue(config) ?? thinDependencyIssue(config))
     return {
       activeSource,
       isConfigured: true,
@@ -133,12 +302,10 @@ export const getSnapshot = async (): Promise<LauncherSnapshot> => {
       isConfigured: true,
       isHealthy: false,
       managerRoot,
-      enginePath,
+      enginePath: managerRoot ? path.join(managerRoot, 'tools', 'PZ-Freeze-Manager.ps1') : null,
       config: null,
       lastBackup: null,
-      issue: existsSync(configPath)
-        ? (error instanceof Error ? error.message : 'Unable to read the freeze configuration.')
-        : '版本库已就绪，尚未创建受管版本。'
+      issue: error instanceof Error ? error.message : 'Unable to read the freeze configuration.'
     }
   }
 }
@@ -153,7 +320,7 @@ export const chooseManagerRoot = async (): Promise<LauncherSnapshot> => {
 
   const managerRoot = result.filePaths[0]
   const entries = await fs.readdir(managerRoot)
-  const looksLikeManager = existsSync(path.join(managerRoot, 'current-freeze.json')) || existsSync(path.join(managerRoot, 'tools', 'PZ-Freeze-Manager.ps1'))
+  const looksLikeManager = existsSync(path.join(managerRoot, 'current-freeze.json')) || existsSync(path.join(managerRoot, 'tools', 'PZ-Freeze-Manager.ps1')) || existsSync(path.join(managerRoot, 'frozen'))
   if (entries.length > 0 && !looksLikeManager) {
     await dialog.showMessageBox({
       type: 'warning',
@@ -165,71 +332,83 @@ export const chooseManagerRoot = async (): Promise<LauncherSnapshot> => {
 
   await fs.mkdir(path.join(managerRoot, 'frozen'), { recursive: true })
   await fs.mkdir(path.join(managerRoot, 'logs'), { recursive: true })
+  const previousSettings = await readSettings()
+  const registry = await readRegistry()
+  if (previousSettings.managerRoot) addManagerRoot(registry, previousSettings.managerRoot)
+  addManagerRoot(registry, managerRoot)
+  await saveRegistry(registry)
   await saveManagerRoot(managerRoot)
+  await syncRegistry()
   return getSnapshot()
 }
 
 export const listVersions = async (): Promise<FreezeVersionSummary[]> => {
-  const snapshot = await getSnapshot()
-  if (!snapshot.managerRoot) return []
-
-  const frozenRoot = path.join(snapshot.managerRoot, 'frozen')
-  try {
-    const entries = await fs.readdir(frozenRoot, { withFileTypes: true })
-    const versions = await Promise.all(entries.filter((entry) => entry.isDirectory()).map(async (entry) => {
-      const freezeRoot = path.join(frozenRoot, entry.name)
-      const metadataPath = path.join(freezeRoot, 'metadata', 'freeze.json')
-      try {
-        const config = parseJson<FreezeConfig>(await fs.readFile(metadataPath, 'utf8'))
-        const gamePath = config.StorageMode === 'ThinReference' ? config.GamePath : path.join(freezeRoot, 'game')
-        const cachePath = config.StorageMode === 'ThinReference' ? config.CachePath : path.join(freezeRoot, 'cache')
-        const dependencyHealthy = thinDependencyIssue(config) === null
-        return {
-          id: entry.name,
-          name: config.DisplayName?.trim() || entry.name,
-          freezeRoot,
-          gamePath,
-          cachePath,
-          backupPath: config.BackupPath || path.join(freezeRoot, 'backups'),
-          version: config.Version ?? entry.name,
-          fullVersion: config.FullVersion,
-          buildId: config.BuildID,
-          created: config.Created,
-          workshopProjectCount: config.WorkshopProjectCount,
-          effectiveModCount: effectiveModCount(config),
-          storageMode: config.StorageMode ?? 'FullCopy',
-          isActive: snapshot.activeSource === 'Frozen' && path.resolve(snapshot.config?.FreezeRoot ?? '') === path.resolve(freezeRoot),
-          isHealthy: dependencyHealthy && existsSync(gamePath) && existsSync(cachePath)
-        } satisfies FreezeVersionSummary
-      } catch {
-        return null
+  const { registry, settings, activeRoot } = await syncRegistry()
+  const versions = await Promise.all(registry.versions.map(async (registration): Promise<FreezeVersionSummary> => {
+    const freezeRoot = normalizeRoot(registration.freezeRoot)
+    const fallback = {
+      id: registration.id,
+      name: path.basename(freezeRoot),
+      freezeRoot,
+      version: '未知',
+      origin: registration.origin,
+      managerRoot: registration.managerRoot,
+      registeredAt: registration.registeredAt,
+      isActive: settings.activeSource === 'Frozen' && Boolean(activeRoot) && rootKey(activeRoot!) === rootKey(freezeRoot),
+      isHealthy: false
+    } satisfies FreezeVersionSummary
+    try {
+      const config = normalizedVersionConfig(
+        parseJson<FreezeConfig>(await fs.readFile(path.join(freezeRoot, 'metadata', 'freeze.json'), 'utf8')),
+        freezeRoot
+      )
+      const dependencyHealthy = quarantineIssue(config) === null && thinDependencyIssue(config) === null
+      return {
+        ...fallback,
+        name: config.DisplayName?.trim() || path.basename(freezeRoot),
+        gamePath: config.GamePath,
+        cachePath: config.CachePath,
+        backupPath: config.BackupPath,
+        version: config.Version ?? path.basename(freezeRoot),
+        fullVersion: config.FullVersion,
+        buildId: config.BuildID,
+        created: config.Created,
+        workshopProjectCount: config.WorkshopProjectCount,
+        effectiveModCount: effectiveModCount(config),
+        storageMode: config.StorageMode ?? 'FullCopy',
+        managerRoot: registration.managerRoot ?? config.ManagerRoot,
+        shareInstallStatus: config.ShareInstallStatus,
+        isHealthy: dependencyHealthy && existsSync(config.GamePath) && existsSync(config.CachePath)
       }
-    }))
-    const validVersions = versions.filter((version): version is NonNullable<typeof version> => version !== null)
-    return validVersions.sort((a, b) => (b.created ?? '').localeCompare(a.created ?? ''))
-  } catch {
-    return []
-  }
+    } catch {
+      return fallback
+    }
+  }))
+  return versions.sort((a, b) => (b.created ?? b.registeredAt ?? '').localeCompare(a.created ?? a.registeredAt ?? ''))
 }
 
 export const activateVersion = async (versionId: string): Promise<LauncherSnapshot> => {
-  const managerRoot = (await readSettings()).managerRoot
-  if (!managerRoot) throw new Error('Select a valid freeze manager folder first.')
-  if (!versionId || path.basename(versionId) !== versionId) throw new Error('Invalid version identifier.')
-
-  const freezeRoot = path.join(managerRoot, 'frozen', versionId)
+  if (!versionId) throw new Error('Invalid version identifier.')
+  const settings = await readSettings()
+  const versions = await listVersions()
+  const version = versions.find((candidate) => (
+    candidate.id === versionId || rootKey(candidate.freezeRoot) === rootKey(versionId) || path.basename(candidate.freezeRoot) === versionId
+  ))
+  if (!version) throw new Error('登记册中没有找到所选版本。')
+  const freezeRoot = normalizeRoot(version.freezeRoot)
   const metadataPath = path.join(freezeRoot, 'metadata', 'freeze.json')
-  const configPath = path.join(managerRoot, 'current-freeze.json')
-  const config = parseJson<FreezeConfig>(await fs.readFile(metadataPath, 'utf8'))
-  const gamePath = config.StorageMode === 'ThinReference' ? config.GamePath : path.join(freezeRoot, 'game')
-  const cachePath = config.StorageMode === 'ThinReference' ? config.CachePath : path.join(freezeRoot, 'cache')
+  const config = normalizedVersionConfig(parseJson<FreezeConfig>(await fs.readFile(metadataPath, 'utf8')), freezeRoot)
+  const quarantined = quarantineIssue(config)
+  if (quarantined) throw new Error(quarantined)
+  const gamePath = config.GamePath
+  const cachePath = config.CachePath
   const dependencyIssue = thinDependencyIssue(config)
   if (dependencyIssue) throw new Error(dependencyIssue)
   if (!existsSync(gamePath) || !existsSync(cachePath)) throw new Error('The selected frozen version is incomplete.')
 
   const nextConfig: FreezeConfig = {
     ...config,
-    ManagerRoot: managerRoot,
+    ManagerRoot: version.managerRoot ?? config.ManagerRoot ?? settings.managerRoot ?? path.dirname(path.dirname(freezeRoot)),
     FreezeRoot: freezeRoot,
     GamePath: gamePath,
     CachePath: cachePath,
@@ -241,10 +420,53 @@ export const activateVersion = async (versionId: string): Promise<LauncherSnapsh
     )
   }
 
-  if (existsSync(configPath)) await fs.copyFile(configPath, `${configPath}.launcher-backup`)
-  await fs.writeFile(configPath, JSON.stringify(nextConfig, null, 2), 'utf8')
-  await saveActiveSource('Frozen')
+  if (settings.managerRoot) {
+    const configPath = path.join(settings.managerRoot, 'current-freeze.json')
+    if (existsSync(configPath)) await fs.copyFile(configPath, `${configPath}.launcher-backup`)
+    await fs.writeFile(configPath, JSON.stringify(nextConfig, null, 2), 'utf8')
+  }
+  await saveActiveSource('Frozen', freezeRoot)
   return getSnapshot()
+}
+
+export const importVersion = async (): Promise<VersionImportResult> => {
+  const result = await dialog.showOpenDialog({
+    title: '导入外部 Project Zomboid 版本',
+    properties: ['openDirectory', 'multiSelections'],
+    buttonLabel: '登记所选版本'
+  })
+  if (result.canceled || !result.filePaths.length) return { canceled: true, imported: 0, skipped: 0, message: '已取消导入。' }
+
+  const registry = await readRegistry()
+  let imported = 0
+  let skipped = 0
+  for (const selectedPath of result.filePaths) {
+    const candidates = existsSync(path.join(selectedPath, 'metadata', 'freeze.json'))
+      ? [selectedPath]
+      : await discoverManagerRoots(selectedPath)
+    if (!candidates.length) {
+      skipped += 1
+      continue
+    }
+    for (const freezeRoot of candidates) {
+      try {
+        parseJson<FreezeConfig>(await fs.readFile(path.join(freezeRoot, 'metadata', 'freeze.json'), 'utf8'))
+        const existed = registry.versions.some((candidate) => rootKey(candidate.freezeRoot) === rootKey(freezeRoot))
+        const isManagerRoot = candidates.length > 1 || rootKey(path.dirname(freezeRoot)) === rootKey(path.join(selectedPath, 'frozen'))
+        if (isManagerRoot) addManagerRoot(registry, selectedPath)
+        registerRoot(registry, freezeRoot, isManagerRoot ? 'Managed' : 'External', isManagerRoot ? selectedPath : undefined)
+        if (existed) skipped += 1
+        else imported += 1
+      } catch {
+        skipped += 1
+      }
+    }
+  }
+  await saveRegistry(registry)
+  const message = imported
+    ? `已登记 ${imported} 个版本${skipped ? `，跳过 ${skipped} 个无效或重复目录` : ''}。`
+    : `没有登记新版本；跳过 ${skipped} 个无效或重复目录。请选择包含 metadata\\freeze.json 的版本目录。`
+  return { canceled: false, imported, skipped, message }
 }
 
 export const activateSteam = async (): Promise<LauncherSnapshot> => {
@@ -266,8 +488,8 @@ export const runAction = async (action: LauncherAction): Promise<ActionResult> =
     }
     throw new Error('Steam 原版存档备份尚未开放。')
   }
-  if (!snapshot.isHealthy || !snapshot.managerRoot || !snapshot.config) {
-    throw new Error(snapshot.issue ?? 'Select a valid freeze manager folder first.')
+  if (!snapshot.isHealthy || !snapshot.config) {
+    throw new Error(snapshot.issue ?? 'Select a valid frozen version first.')
   }
 
   if (!snapshot.enginePath || !existsSync(snapshot.enginePath) || (snapshot.config.StorageMode === 'ThinReference' && action !== 'BackupSave')) {
@@ -283,7 +505,7 @@ export const runAction = async (action: LauncherAction): Promise<ActionResult> =
     '-Action',
     action,
     '-ManagerRoot',
-    snapshot.managerRoot
+    snapshot.config.ManagerRoot || snapshot.managerRoot || path.dirname(path.dirname(snapshot.config.FreezeRoot))
   ]
 
   return new Promise((resolve, reject) => {
@@ -447,8 +669,9 @@ const runNativeAction = async (action: LauncherAction, config: FreezeConfig): Pr
 
 export const openLogs = async (): Promise<boolean> => {
   const snapshot = await getSnapshot()
-  if (!snapshot.managerRoot) return false
-  const logPath = path.join(snapshot.managerRoot, 'logs')
+  const managerRoot = snapshot.config?.ManagerRoot || snapshot.managerRoot
+  if (!managerRoot) return false
+  const logPath = path.join(managerRoot, 'logs')
   if (!existsSync(logPath)) return false
   return (await shell.openPath(logPath)) === ''
 }

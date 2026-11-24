@@ -9,6 +9,9 @@ export type ResolvedMod = {
   record: CompatibilityModRecord
   layers: string[]
   metadata: ModInfo
+  metadataPath: string | null
+  metadataError: string | null
+  resolutionIssue: string | null
   tileDefinitions: Array<{ name: string; number: number }>
   variantKeys: Array<{ name: string; key: number }>
 }
@@ -19,12 +22,13 @@ const parseVersion = (value: string): { major: number; minor: number; patch: num
   const major = Number(match[1])
   const minor = Number(match[2] ?? 0)
   const patch = Number(match[3] ?? 0)
-  return { major, minor, patch, key: major * 1000 + minor }
+  return { major, minor, patch, key: major * 1_000_000 + minor * 1_000 + patch }
 }
 
 export const gameVersionKey = (value: string): number => parseVersion(value)?.key ?? -1
 
-const readModInfo = async (filePath: string): Promise<ModInfo> => {
+const readModInfo = async (filePath: string): Promise<{ data: ModInfo; error: string | null }> => {
+  if (!existsSync(filePath)) return { data: {}, error: null }
   try {
     const raw = (await fs.readFile(filePath, 'utf8')).replace(/^\uFEFF/, '')
     const result: ModInfo = {}
@@ -36,17 +40,19 @@ const readModInfo = async (filePath: string): Promise<ModInfo> => {
       if (!result[key]) result[key] = []
       result[key].push(value)
     }
-    return result
-  } catch {
-    return {}
+    return { data: result, error: null }
+  } catch (error) {
+    return { data: {}, error: error instanceof Error ? error.message : '读取失败' }
   }
 }
 
 const firstValue = (info: ModInfo, key: string): string | null => info[key]?.find((value) => value.length > 0) ?? null
 
+export const normalizeModId = (value: string): string => value.trim().replace(/^[\\+]+/, '').trim()
+
 const splitIds = (info: ModInfo, key: string): string[] => {
   const values = info[key] ?? []
-  return [...new Set(values.flatMap((value) => value.split(/[;,]/)).map((value) => value.trim().replace(/^\\+/, '')).filter(Boolean))]
+  return [...new Set(values.flatMap((value) => value.split(/[;,]/)).map(normalizeModId).filter(Boolean))]
 }
 
 const fallbackModName = (directoryName: string): string =>
@@ -61,30 +67,43 @@ const resolveModRoot = async (
 ): Promise<ResolvedMod> => {
   const target = parseVersion(targetVersion)
   const entries = await fs.readdir(rootPath, { withFileTypes: true })
-  const variants = entries
+  const allVariants = entries
     .filter((entry) => entry.isDirectory())
     .map((entry) => ({ name: entry.name, parsed: parseVersion(entry.name) }))
     .filter((entry): entry is { name: string; parsed: NonNullable<ReturnType<typeof parseVersion>> } => Boolean(entry.parsed))
+  const variants = allVariants
     .filter((entry) => !target || entry.parsed.major === target.major)
     .sort((left, right) => left.parsed.key - right.parsed.key || left.name.localeCompare(right.name, 'en'))
   const compatible = variants.filter((variant) => !target || variant.parsed.key <= target.key)
   const selected = compatible.at(-1) ?? null
   const commonPath = path.join(rootPath, 'common')
   const hasCommon = existsSync(commonPath)
-  const usesVersionLayout = hasCommon || variants.length > 0
+  const usesVersionLayout = hasCommon || allVariants.length > 0
   const layers = usesVersionLayout
     ? [hasCommon ? commonPath : null, selected ? path.join(rootPath, selected.name) : null].filter((value): value is string => Boolean(value))
     : [rootPath]
 
-  const rootMetadata = await readModInfo(path.join(rootPath, 'mod.info'))
-  const commonMetadata = hasCommon ? await readModInfo(path.join(commonPath, 'mod.info')) : {}
-  const selectedMetadata = selected ? await readModInfo(path.join(rootPath, selected.name, 'mod.info')) : {}
-  const metadata = Object.keys(selectedMetadata).length
-    ? selectedMetadata
-    : Object.keys(commonMetadata).length
-      ? commonMetadata
-      : rootMetadata
-  const modId = firstValue(metadata, 'id')?.replace(/^\\+/, '') ?? null
+  const rootMetadataPath = path.join(rootPath, 'mod.info')
+  const commonMetadataPath = path.join(commonPath, 'mod.info')
+  const selectedMetadataPath = selected ? path.join(rootPath, selected.name, 'mod.info') : null
+  const rootMetadata = await readModInfo(rootMetadataPath)
+  const commonMetadata = hasCommon ? await readModInfo(commonMetadataPath) : { data: {}, error: null }
+  const selectedMetadata = selectedMetadataPath ? await readModInfo(selectedMetadataPath) : { data: {}, error: null }
+  const metadataSource = Object.keys(selectedMetadata.data).length
+    ? { data: selectedMetadata.data, path: selectedMetadataPath }
+    : Object.keys(commonMetadata.data).length
+      ? { data: commonMetadata.data, path: commonMetadataPath }
+      : { data: rootMetadata.data, path: existsSync(rootMetadataPath) ? rootMetadataPath : null }
+  const metadata = metadataSource.data
+  const metadataErrors = [
+    selectedMetadataPath && existsSync(selectedMetadataPath) && selectedMetadata.error ? `${selectedMetadataPath}：${selectedMetadata.error}` : null,
+    !Object.keys(selectedMetadata.data).length && hasCommon && existsSync(commonMetadataPath) && commonMetadata.error ? `${commonMetadataPath}：${commonMetadata.error}` : null,
+    metadataSource.path === rootMetadataPath && rootMetadata.error ? `${rootMetadataPath}：${rootMetadata.error}` : null
+  ].filter((value): value is string => Boolean(value))
+  const resolutionIssue = usesVersionLayout && layers.length === 0
+    ? `没有适用于游戏 ${targetVersion} 的 common 或版本目录；可见目录：${allVariants.map((variant) => variant.name).join('、') || '无'}`
+    : null
+  const modId = firstValue(metadata, 'id') ? normalizeModId(firstValue(metadata, 'id')!) : null
   const name = firstValue(metadata, 'name') ?? fallbackModName(path.basename(rootPath))
   const tileDefinitions = (metadata.tiledef ?? []).flatMap((value) => value.split(',')).flatMap((value) => {
     const match = value.trim().match(/^(.*?)\s+(\d+)$/)
@@ -111,8 +130,11 @@ const resolveModRoot = async (
     },
     layers,
     metadata,
+    metadataPath: metadataSource.path,
+    metadataError: metadataErrors.length ? metadataErrors.join('；') : null,
+    resolutionIssue,
     tileDefinitions,
-    variantKeys: variants.map((variant) => ({ name: variant.name, key: variant.parsed.key }))
+    variantKeys: allVariants.map((variant) => ({ name: variant.name, key: variant.parsed.key }))
   }
 }
 

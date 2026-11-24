@@ -36,7 +36,7 @@ import {
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import type { ActionResult, CompatibilityReport, CompatibilitySeverity, FreezeVersionSummary, LauncherAction, LauncherSnapshot, MigrationMode, MigrationPreview, MigrationSourceType, ModSummary, SteamInstallation } from '../../shared/types'
+import type { ActionResult, AnalysisConfidence, CompatibilityReport, CompatibilitySeverity, FileOverlapClassification, FreezeVersionSummary, IntegrityReport, LauncherAction, LauncherSnapshot, MigrationMode, MigrationPreview, MigrationSourceType, ModSummary, SharePackageInspection, SteamInstallation } from '../../shared/types'
 import { VaultMark } from './VaultMark'
 
 type Notice = { kind: 'success' | 'error'; text: string } | null
@@ -96,17 +96,19 @@ const helpTutorials: HelpTutorial[] = [
   },
   {
     id: 'versions', number: '03', eyebrow: 'VERSION LIBRARY', title: '版本管理',
-    summary: '理解 Steam 原版、完整冻结版和快速薄版本之间的关系。',
-    prerequisites: ['已选择版本管理目录', '至少存在 Steam 原版或一个健康冻结版', '创建前关闭游戏和可能占用文件的工具'],
+    summary: '使用全局登记册管理 Steam 原版、管理器制作版本和外部冻结版本。',
+    prerequisites: ['Steam 原版会自动登记', '管理器制作的版本会随管理目录自动登记', '外部版本目录需要包含 metadata\\freeze.json'],
     sections: [
       { title: '识别三种状态', intro: '版本卡以可启动性为核心，不只依赖文件夹名称。', steps: [
         { title: 'Steam 原版', detail: '由 Steam 更新，Build 可能变化；适合作为新冻结版来源。' },
         { title: '完整冻结版', detail: '游戏、MOD 和可变数据均独立，占用更大但便于整体归档或移动。' },
         { title: '快速薄版本', detail: '直接引用完整冻结版的游戏核心，并以同卷 NTFS 硬链接复用启用 MOD；存档和运行时配置仍保持独立。' }
       ] },
-      { title: '日常管理流程', intro: '先检查健康状态，再切换和启动。', steps: [
-        { title: '查看版本详情', detail: '点击版本卡，核对冻结时间、有效模组、Workshop 数量以及文件位置。' },
-        { title: '发现不可用版本', detail: '不要反复启动；先确认版本目录、game、cache 等核心路径没有被移动或删除。' }
+      { title: '登记与日常管理', intro: '版本集合不受当前迁移目标目录限制，登记后会持续显示。', steps: [
+        { title: '自动登记', detail: 'Steam 原版和所有已记录管理器目录中的冻结版本会自动进入集合。切换迁移目标目录不会隐藏旧版本。' },
+        { title: '导入外部版本', detail: '点击“导入外部版本”，可选择单个冻结版本目录，也可选择包含 frozen 子目录的管理器目录。导入只登记位置，不复制游戏文件。' },
+        { title: '查看版本详情', detail: '点击版本卡，核对来源、有效模组、登记时间以及实际文件位置。' },
+        { title: '发现不可用版本', detail: '登记项会继续保留并显示不可用；先确认版本目录、game、cache 等核心路径没有被移动或删除。' }
       ] }
     ],
     result: '健康版本可切换、可打开目录且能读取版本和模组摘要；异常版本会被阻止启动。',
@@ -293,32 +295,116 @@ const compatibilityLabels: Record<CompatibilitySeverity, string> = {
   pass: '通过'
 }
 
+const confidenceLabels: Record<AnalysisConfidence, string> = {
+  confirmed: '事实已确认',
+  inferred: '风险推断',
+  unverified: '证据不足'
+}
+
+const overlapLabels: Record<FileOverlapClassification, string> = {
+  lua: 'Lua 脚本',
+  scripts: '游戏脚本',
+  map: '地图文件',
+  'tile-definition': 'Tile 定义',
+  translation: '翻译文件',
+  binary: '二进制扩展',
+  asset: '资源文件',
+  metadata: '元数据',
+  other: '其他文件'
+}
+
+type ReadableFinding = {
+  severity: CompatibilitySeverity
+  confidence: AnalysisConfidence
+  title: string
+  summary: string
+  impact: string
+  action: string
+  rule: string
+  evidence: string[]
+  appliesToScope?: boolean
+}
+
+const FindingCard = ({ entry }: { entry: ReadableFinding }): React.JSX.Element => (
+  <article className={`compatibility-issue ${entry.severity} ${entry.appliesToScope === false ? 'out-of-scope' : ''}`}>
+    <div className="issue-labels">
+      <span className="issue-severity">{compatibilityLabels[entry.severity]}</span>
+      <span className={`confidence-label ${entry.confidence}`}>{confidenceLabels[entry.confidence]}</span>
+      {entry.appliesToScope === false && <span className="scope-label">其他配置</span>}
+    </div>
+    <div className="issue-content">
+      <b>{entry.title}</b>
+      <p>{entry.summary}</p>
+      <div className="issue-meaning">
+        <p><strong>会有什么影响</strong><span>{entry.impact}</span></p>
+        <p><strong>应该怎么处理</strong><span>{entry.action}</span></p>
+      </div>
+      <details className="issue-evidence">
+        <summary>查看判定依据 <span>{entry.rule}</span></summary>
+        {entry.evidence.length > 0 ? <code>{entry.evidence.slice(0, 12).join('\n')}</code> : <small>该规则没有额外路径或日志证据。</small>}
+      </details>
+    </div>
+  </article>
+)
+
+const ReportMethod = ({ methodology, limitations }: { methodology: string[]; limitations: string[] }): React.JSX.Element => (
+  <details className="report-method">
+    <summary>这份报告是怎样得出结论的</summary>
+    <div><section><b>检查方法</b>{methodology.map((item) => <p key={item}>{item}</p>)}</section><section><b>结论边界</b>{limitations.map((item) => <p key={item}>{item}</p>)}</section></div>
+  </details>
+)
+
 const CompatibilityResults = ({ report }: { report: CompatibilityReport }): React.JSX.Element => (
   <section className="compatibility-report enter">
     <div className="compatibility-report-header">
       <div><span className="eyebrow">COMPATIBILITY REPORT</span><h2>{report.sourceLabel}</h2><p>生成于 {formatDate(report.generatedAt)} · 报告已保存到 {report.reportPath ?? '应用数据目录'}</p></div>
       <div className={`compatibility-verdict ${report.verdict}`}><span />{compatibilityLabels[report.verdict]}</div>
     </div>
+    <div className="report-plain-summary"><b>本次结论</b><p>{report.plainSummary}</p><span>分析范围：{report.scopeLabel}</span></div>
     <div className="compatibility-stats">
       <div><span>已安装 MOD</span><b>{report.summary.installedMods}</b><small>激活 {report.summary.activeMods}</small></div>
       <div className="danger"><span>阻断</span><b>{report.summary.blockers}</b><small>必须处理</small></div>
       <div className="warning"><span>警告</span><b>{report.summary.warnings}</b><small>建议检查</small></div>
       <div className="unknown"><span>待验证</span><b>{report.summary.unknowns}</b><small>需要语义分析</small></div>
-      <div><span>路径重叠</span><b>{report.summary.overlapPaths}</b><small>覆盖原版 {report.summary.baseGameOverrides}</small></div>
+      <div><span>路径重叠</span><b>{report.summary.overlapPaths}</b><small>内容相同 {report.summary.identicalOverlapPaths} · 覆盖原版 {report.summary.baseGameOverrides}</small></div>
     </div>
     <div className="identity-evidence">
       <ShieldCheck /><div><b>{report.identity.version} · Build {report.identity.buildId}</b><span>revision {report.identity.revision ?? '未知'} · {report.identity.status === 'stale-cache' ? '运行缓存已过期，以二进制为准' : '二进制身份已解析'}</span></div>
     </div>
     <div className="compatibility-columns">
       <div className="compatibility-issues">
-        <div className="report-section-title"><h3>规则结果</h3><span>{report.issues.length} 项</span></div>
-        {report.issues.map((entry) => <article className={`compatibility-issue ${entry.severity}`} key={entry.id}><div className="issue-severity">{compatibilityLabels[entry.severity]}</div><div><b>{entry.title}</b><p>{entry.summary}</p>{entry.evidence.length > 0 && <code>{entry.evidence.slice(0, 3).join(' · ')}</code>}</div></article>)}
+        <div className="report-section-title"><h3>规则结果</h3><span>{report.issues.filter((entry) => entry.appliesToScope).length} 项影响当前范围 · {report.issues.length} 项已列出</span></div>
+        {report.issues.map((entry) => <FindingCard entry={entry} key={entry.id} />)}
       </div>
       <div className="overlap-evidence">
         <div className="report-section-title"><h3>文件覆盖证据</h3><span>显示 {report.overlaps.length}/{report.summary.overlapPaths}</span></div>
-        {report.overlaps.length ? report.overlaps.slice(0, 40).map((overlap) => <article key={`${overlap.classification}:${overlap.relativePath}`}><div><span className={`overlap-kind ${overlap.severity}`}>{overlap.classification}</span>{overlap.overridesBaseGame && <span className="base-override">覆盖原版</span>}</div><code>{overlap.relativePath}</code><small>{overlap.modIds.join(' · ')}</small></article>) : <div className="report-empty"><CheckCircle2 />没有需要展示的同路径覆盖</div>}
+        {report.overlaps.length ? report.overlaps.slice(0, 40).map((overlap) => <article key={`${overlap.classification}:${overlap.relativePath}`}><div><span className={`overlap-kind ${overlap.severity}`}>{overlapLabels[overlap.classification]}</span>{overlap.contentIdentical === true && <span className="identical-overlap">内容相同</span>}{overlap.contentIdentical === null && <span className="hash-unavailable">哈希未完成</span>}{overlap.overridesBaseGame && <span className="base-override">覆盖原版</span>}</div><code>{overlap.relativePath}</code><small>{overlap.modIds.join(' · ')}</small></article>) : <div className="report-empty"><CheckCircle2 />没有需要展示的同路径覆盖</div>}
       </div>
     </div>
+    <ReportMethod methodology={report.methodology} limitations={report.limitations} />
+  </section>
+)
+
+const IntegrityResults = ({ report }: { report: IntegrityReport }): React.JSX.Element => (
+  <section className="compatibility-report integrity-report enter">
+    <div className="compatibility-report-header">
+      <div><span className="eyebrow">INTEGRITY REPORT</span><h2>{report.sourceLabel}</h2><p>生成于 {formatDate(report.generatedAt)} · 报告已保存到 {report.reportPath ?? '应用数据目录'}</p></div>
+      <div className={`compatibility-verdict ${report.verdict}`}><span />{compatibilityLabels[report.verdict]}</div>
+    </div>
+    <div className="report-plain-summary"><b>本次结论</b><p>{report.plainSummary}</p><span>存储方式：{report.storageMode === 'ThinReference' ? '快速迁移版（引用与回退复制）' : report.storageMode === 'FullCopy' ? '全量迁移版（独立文件）' : 'Steam 原版'}</span></div>
+    <div className="compatibility-stats integrity-stats">
+      <div><span>已检查项目</span><b>{report.summary.checkedFiles}</b><small>{report.storageMode === 'ThinReference' ? '文件与引用' : '基线文件'}</small></div>
+      <div className="danger"><span>缺失</span><b>{report.summary.missingFiles}</b><small>基线内容不存在</small></div>
+      <div className="warning"><span>变化</span><b>{report.summary.changedFiles}</b><small>SHA-256 不一致</small></div>
+      <div className="warning"><span>新增</span><b>{report.summary.addedFiles}</b><small>基线外内容</small></div>
+      <div className="danger"><span>不可读</span><b>{report.summary.unreadableFiles}</b><small>无法完成哈希</small></div>
+      <div className="unknown"><span>断裂引用</span><b>{report.summary.brokenReferences}</b><small>快速版依赖异常</small></div>
+    </div>
+    <div className="integrity-findings">
+      <div className="report-section-title"><h3>文件与结构结论</h3><span>{report.findings.length} 项</span></div>
+      {report.findings.map((entry) => <FindingCard entry={entry} key={entry.id} />)}
+    </div>
+    <ReportMethod methodology={report.methodology} limitations={report.limitations} />
   </section>
 )
 
@@ -339,12 +425,16 @@ export const App = (): React.JSX.Element => {
   const [isModsDrawerOpen, setModsDrawerOpen] = useState(previewMode?.get('mods') === 'open')
   const [currentMods, setCurrentMods] = useState<ModSummary[]>([])
   const [modsLoading, setModsLoading] = useState(false)
+  const [analysisMode, setAnalysisMode] = useState<'integrity' | 'compatibility'>('integrity')
+  const [integrityReport, setIntegrityReport] = useState<IntegrityReport | null>(null)
+  const [integrityLoading, setIntegrityLoading] = useState(false)
   const [compatibilityReport, setCompatibilityReport] = useState<CompatibilityReport | null>(null)
   const [compatibilityLoading, setCompatibilityLoading] = useState(false)
+  const [showAnalysisResponsibilities, setShowAnalysisResponsibilities] = useState(false)
   const [isTerminalOpen, setTerminalOpen] = useState(previewMode?.get('terminal') === 'open')
   const [isTerminalPinned, setTerminalPinned] = useState(false)
   const [showTerminal, setShowTerminal] = useState(() => previewMode?.get('terminal') === 'open' || window.localStorage.getItem('pz-vault-show-terminal') === 'true' || window.localStorage.getItem('pz-vault-show-recent-activity') === 'true')
-  const [showVersionRadar, setShowVersionRadar] = useState(() => previewMode?.get('versionView') !== 'list' && window.localStorage.getItem('pz-vault-version-view') !== 'list')
+  const [showVersionRadar, setShowVersionRadar] = useState(() => previewMode?.get('versionView') === 'radar' || window.localStorage.getItem('pz-vault-version-registry-view') === 'radar')
   const [steam, setSteam] = useState<SteamInstallation | null>(null)
   const [maintenanceSection, setMaintenanceSection] = useState<'version-control' | 'integrity' | 'share'>('version-control')
   const [migrationMode, setMigrationMode] = useState<MigrationMode>('SafeCopy')
@@ -353,6 +443,9 @@ export const App = (): React.JSX.Element => {
   const [migrationLabel, setMigrationLabel] = useState('')
   const [migrationPreview, setMigrationPreview] = useState<MigrationPreview | null>(null)
   const [migrationBusy, setMigrationBusy] = useState(false)
+  const [versionImportBusy, setVersionImportBusy] = useState(false)
+  const [shareBusy, setShareBusy] = useState<'create' | 'inspect' | 'install' | null>(null)
+  const [shareInspection, setShareInspection] = useState<SharePackageInspection | null>(null)
   const [saveProtection, setSaveProtection] = useState(() => window.localStorage.getItem('pz-vault-save-protection') === 'true')
   const [showSaveOnboarding, setShowSaveOnboarding] = useState(() => previewMode?.get('onboarding') === 'open' || (!import.meta.env.DEV && window.localStorage.getItem('pz-vault-save-onboarding-seen') !== 'true'))
 
@@ -378,6 +471,7 @@ export const App = (): React.JSX.Element => {
         setTerminalOpen(false)
         setTerminalPinned(false)
         setActiveHelpTopic(null)
+        setShowAnalysisResponsibilities(false)
       }
     }
     window.addEventListener('keydown', closeOnEscape)
@@ -406,10 +500,70 @@ export const App = (): React.JSX.Element => {
     }
   }
 
+  const importExternalVersion = async (): Promise<void> => {
+    setVersionImportBusy(true)
+    try {
+      const result = await window.vault.importVersion()
+      if (result.canceled) return
+      setVersions(await window.vault.listVersions())
+      setNotice({ kind: result.imported ? 'success' : 'error', text: result.message })
+    } catch (error) {
+      setNotice({ kind: 'error', text: error instanceof Error ? error.message : '外部版本导入失败。' })
+    } finally {
+      setVersionImportBusy(false)
+    }
+  }
+
+  const createShareManifest = async (): Promise<void> => {
+    setShareBusy('create')
+    try {
+      const result = await window.vault.createSharePackage()
+      if (result.canceled) return
+      setNotice({ kind: result.ok ? 'success' : 'error', text: result.message })
+    } catch (error) {
+      setNotice({ kind: 'error', text: error instanceof Error ? error.message : '共享清单制作失败。' })
+    } finally {
+      setShareBusy(null)
+    }
+  }
+
+  const inspectSharedManifest = async (): Promise<void> => {
+    setShareBusy('inspect')
+    try {
+      const result = await window.vault.inspectSharePackage()
+      if (result.canceled) return
+      setShareInspection(result)
+      setNotice({ kind: result.valid ? 'success' : 'error', text: result.message })
+    } catch (error) {
+      setNotice({ kind: 'error', text: error instanceof Error ? error.message : '共享包验证失败。' })
+    } finally {
+      setShareBusy(null)
+    }
+  }
+
+  const installSharedManifest = async (): Promise<void> => {
+    if (!shareInspection?.filePath) return
+    setShareBusy('install')
+    try {
+      const result = await window.vault.installSharePackage(shareInspection.filePath)
+      setNotice({ kind: result.ok ? 'success' : 'error', text: result.message })
+      if (result.installedRoot) {
+        await refresh()
+        setIntegrityReport(null)
+        setCompatibilityReport(null)
+      }
+    } catch (error) {
+      setNotice({ kind: 'error', text: error instanceof Error ? error.message : '共享版本安装失败。' })
+    } finally {
+      setShareBusy(null)
+    }
+  }
+
   const activateVersion = async (versionId: string): Promise<void> => {
     setSwitchingVersion(versionId)
     try {
       const next = await window.vault.activateVersion(versionId)
+      setIntegrityReport(null)
       setCompatibilityReport(null)
       setSnapshot(next)
       setVersions(await window.vault.listVersions())
@@ -426,6 +580,7 @@ export const App = (): React.JSX.Element => {
     setSwitchingVersion('steam-original')
     try {
       const next = await window.vault.activateSteam()
+      setIntegrityReport(null)
       setCompatibilityReport(null)
       setSnapshot(next)
       setVersions(await window.vault.listVersions())
@@ -450,7 +605,7 @@ export const App = (): React.JSX.Element => {
   const toggleVersionRadar = (): void => {
     const next = !showVersionRadar
     setShowVersionRadar(next)
-    window.localStorage.setItem('pz-vault-version-view', next ? 'radar' : 'list')
+    window.localStorage.setItem('pz-vault-version-registry-view', next ? 'radar' : 'list')
   }
 
   const updateSaveProtection = (enabled: boolean): void => {
@@ -470,6 +625,10 @@ export const App = (): React.JSX.Element => {
       const result = await window.vault.executeMigration({ sourceType: migrationSourceType, sourceId: migrationSourceType === 'Frozen' ? migrationSourceId : undefined, mode: migrationMode, label: migrationLabel || undefined, protectSaves: saveProtection })
       setLastResult(result)
       setNotice({ kind: result.ok ? 'success' : 'error', text: result.message })
+      if (result.ok) {
+        setIntegrityReport(null)
+        setCompatibilityReport(null)
+      }
       await refresh()
     } catch (error) {
       setNotice({ kind: 'error', text: error instanceof Error ? error.message : '迁移执行失败。' })
@@ -496,6 +655,7 @@ export const App = (): React.JSX.Element => {
   }
 
   const runCompatibilityAnalysis = async (): Promise<void> => {
+    setAnalysisMode('compatibility')
     setCompatibilityLoading(true)
     setCompatibilityReport(null)
     try {
@@ -507,6 +667,27 @@ export const App = (): React.JSX.Element => {
       setNotice({ kind: 'error', text: error instanceof Error ? error.message : '兼容性分析失败。' })
     } finally {
       setCompatibilityLoading(false)
+    }
+  }
+
+  const runIntegrityAnalysis = async (): Promise<void> => {
+    setAnalysisMode('integrity')
+    setIntegrityLoading(true)
+    setBusyAction('Verify')
+    setLastResult(null)
+    if (showTerminal) setTerminalOpen(true)
+    try {
+      const report = await window.vault.analyzeIntegrity()
+      setIntegrityReport(report)
+      const ok = report.verdict === 'pass'
+      setLastResult({ ok, action: 'Verify', message: ok ? '完整性分析通过。' : report.verdict === 'unknown' ? '完整性分析等待外部验证。' : '完整性分析发现阻断项。', output: report.rawOutput, finishedAt: report.generatedAt })
+      setNotice({ kind: ok ? 'success' : report.verdict === 'unknown' ? 'success' : 'error', text: ok ? '完整性分析完成：内容与登记基线一致' : report.verdict === 'unknown' ? '已提交验证，当前结论为待验证' : `完整性分析完成：发现 ${report.summary.findings} 个结论项` })
+      await refresh()
+    } catch (error) {
+      setNotice({ kind: 'error', text: error instanceof Error ? error.message : '完整性分析失败。' })
+    } finally {
+      setBusyAction(null)
+      setIntegrityLoading(false)
     }
   }
 
@@ -546,6 +727,14 @@ export const App = (): React.JSX.Element => {
   const detailTechnicalVersion = detailIsSteam ? steam?.version : detailFrozen?.version
   const detailBuildId = detailIsSteam ? steam?.buildId : detailFrozen?.buildId
   const detailRoot = detailIsSteam ? steam?.gamePath : detailFrozen?.freezeRoot
+  const detailQuarantined = detailFrozen?.shareInstallStatus === 'Quarantined'
+  const detailHealthTitle = detailQuarantined ? '共享版本已隔离' : detailHealthy ? '版本检查通过' : '版本不可用'
+  const detailHealthText = detailQuarantined
+    ? '安装后的游戏或 MOD 指纹与共享清单不一致，管理器已禁止切换和启动。'
+    : detailIsSteam
+      ? steam?.issue ?? 'Steam 原版、Workshop 与用户目录已识别。'
+      : detailHealthy ? '游戏、缓存和版本路径均可访问。' : '该冻结版本缺少必要的游戏、缓存目录或基础依赖。'
+  const detailBuildKind = detailIsSteam ? 'STEAM MANAGED' : detailFrozen?.shareInstallStatus === 'Verified' ? 'VERIFIED SHARE BUILD' : detailQuarantined ? 'QUARANTINED SHARE BUILD' : 'FROZEN BUILD'
   const openCurrentVersionPath = (): void => {
     if (detailRoot) void window.vault.openPath(detailRoot)
   }
@@ -583,6 +772,11 @@ export const App = (): React.JSX.Element => {
     </button>
   )
   const consoleVersionTools = <section className="console-version-tools single enter delay-3"><button onClick={() => openVersionData('saves')}><div className="console-tool-icon blue"><Database /></div><span><b>存档信息</b><small>查看当前版本独立 Saves</small></span><ChevronRight /></button></section>
+  const steamMetricGrid = steam?.detected ? <section className="metric-grid enter delay-2">
+    <article className="metric-card"><div className="metric-icon safe"><ShieldCheck /></div><div><span>环境状态</span><strong>Steam 托管</strong><small>游戏、Workshop 与用户目录已识别</small></div><CheckCircle2 className="ok" /></article>
+    <button className="metric-card interactive" onClick={() => void openMods()}><div className="metric-icon"><Database /></div><div><span>Workshop 项目</span><strong>{steam.workshopProjectCount ?? '—'}</strong><small>点击查看当前可识别模组</small></div><Gamepad2 className="muted" /></button>
+    <article className="metric-card"><div className="metric-icon amber"><HardDrive /></div><div><span>版本来源</span><strong>Steam 原版</strong><small>{formatDate(steam.installedAt)} · 实时更新</small></div><RefreshCw className="muted" /></article>
+  </section> : null
   const selectedHelpTutorial = helpTutorials.find((topic) => topic.id === activeHelpTopic) ?? null
   const selectedHelpIndex = selectedHelpTutorial ? helpTutorials.findIndex((topic) => topic.id === selectedHelpTutorial.id) : -1
 
@@ -623,7 +817,7 @@ export const App = (): React.JSX.Element => {
               {!snapshot ? (
                 <div className="loading-state"><LoaderCircle className="spin" />正在读取环境</div>
               ) : snapshot.activeSource === 'Steam' ? steam?.detected ? (
-                <><section className="steam-console-card enter delay-1"><div className="hero-glow" /><div className="hero-content"><div className="status-pill success"><span />当前版本 · STEAM</div><h2>Steam 原版</h2><div className="build-line"><span>版本 {steam.version}</span><i /><span>Build {steam.buildId}</span></div><p className="hero-description">控制台当前绑定 Steam 原版；模组、存档、备份和日志功能将围绕这个版本展开。</p><div className="hero-actions"><button className="launch-button" disabled={isBusy} onClick={() => void perform('Launch')}>{busyAction === 'Launch' ? <LoaderCircle className="spin" /> : <Play fill="currentColor" />}<span><b>启动 Steam 原版</b><small>STEAM MANAGED</small></span></button><button className="secondary-button" onClick={() => setDrawerOpen(true)}><PanelRightOpen />版本详情</button></div></div><ConsoleVersionRadar versions={versions} steam={steam} activeSource={snapshot.activeSource} onFrozenActivate={(id) => void activateVersion(id)} onSteamActivate={() => void activateSteam()} /></section>{consoleVersionTools}</>
+                <><section className="hero-panel enter delay-1"><div className="hero-glow" /><div className="hero-content"><div className="status-pill success"><span />当前版本 · STEAM</div><h2>Steam 原版</h2><div className="build-line"><span>版本 {steam.version}</span><i /><span>Build {steam.buildId}</span></div><p className="hero-description">从统一版本集合启动；游戏文件由 Steam 管理，模组、存档和兼容性工具仍围绕当前版本工作。</p><div className="hero-actions"><button className="launch-button" disabled={isBusy} onClick={() => void perform('Launch')}>{busyAction === 'Launch' ? <LoaderCircle className="spin" /> : <Play fill="currentColor" />}<span><b>启动当前版本</b><small>STEAM MANAGED</small></span></button><button className="secondary-button" onClick={() => setDrawerOpen(true)}><PanelRightOpen />版本详情</button></div></div><ConsoleVersionRadar versions={versions} steam={steam} activeSource={snapshot.activeSource} onFrozenActivate={(id) => void activateVersion(id)} onSteamActivate={() => void activateSteam()} /></section>{steamMetricGrid}{consoleVersionTools}</>
               ) : (
                 <section className="empty-state enter delay-1"><div className="radar"><span /><span /><span /><ShieldAlert /></div><span className="eyebrow">STEAM NOT DETECTED</span><h2>没有找到 Project Zomboid 原版</h2><p>{steam?.issue ?? '正在检测 Steam 与 AppID 108600。'}</p><button className="primary-button" onClick={() => void refresh()}><RefreshCw />重新检测</button></section>
               ) : (
@@ -643,23 +837,54 @@ export const App = (): React.JSX.Element => {
             </>
           ) : activeView === 'versions' ? (
             <>
-              <section className="page-heading enter"><div><span className="eyebrow">MANAGED BUILDS</span><h1>版本管理</h1><p>统一管理 Steam 原版与冻结版本，并选择控制台当前操作的版本。</p></div><button className="secondary-button" onClick={() => void chooseRoot()}><FolderCog />更换管理器目录</button></section>
+              <section className="page-heading enter"><div><span className="eyebrow">GLOBAL VERSION REGISTRY</span><h1>版本集合</h1><p>集中登记 Steam 原版、所有管理器制作版本和外部导入版本；迁移目标目录不再限制这里的可见范围。</p></div><div className="page-heading-actions"><button className="secondary-button" disabled={versionImportBusy} onClick={() => void importExternalVersion()}>{versionImportBusy ? <LoaderCircle className="spin" /> : <PackageOpen />}导入外部版本</button><button className="secondary-button" onClick={() => void chooseRoot()}><FolderCog />设置迁移目标目录</button></div></section>
               {showVersionRadar ? <VersionRadar versions={versions} steam={steam} activeSource={snapshot?.activeSource ?? 'Steam'} onFrozenActivate={(id) => void activateVersion(id)} onSteamActivate={() => void activateSteam()} /> : <section className="version-grid enter delay-1">
-                <article className={`version-card version-list-card steam ${steam?.detected ? '' : 'unavailable'} ${snapshot?.activeSource === 'Steam' ? 'active' : ''}`} role={steam?.detected ? 'button' : undefined} tabIndex={steam?.detected ? 0 : -1} aria-disabled={!steam?.detected} onClick={steam?.detected ? () => openVersionDetails({ kind: 'Steam' }) : undefined} onKeyDown={steam?.detected ? (event) => { if (event.key === 'Enter') openVersionDetails({ kind: 'Steam' }) } : undefined}><div className="version-list-main"><div className="version-badge steam">ST</div><div className="version-identity"><VersionName name="Steam 原版" /><div className="version-build">版本 {steam?.version ?? '未知'} · Build {steam?.buildId ?? '—'}</div></div><div className="version-hover-details"><span>Workshop <b>{steam?.workshopProjectCount ?? '—'}</b></span><span>更新时间 <b>{formatDate(steam?.installedAt)}</b></span><span>位置 <b>{steam?.libraryPath ? 'Steam 库' : '未识别'}</b></span></div><button className={`tool-action ${snapshot?.activeSource === 'Steam' ? '' : 'primary'}`} disabled={!steam?.detected || snapshot?.activeSource === 'Steam' || switchingId !== null} onClick={(event) => { event.stopPropagation(); void activateSteam() }}>{switchingId === 'steam-original' ? <LoaderCircle className="spin" /> : snapshot?.activeSource === 'Steam' ? <CheckCircle2 /> : <RefreshCw />}{snapshot?.activeSource === 'Steam' ? '当前' : '切换'}</button><ChevronRight className="version-open-icon" /></div></article>
-                {versions.map((version) => <article className={`version-card version-list-card ${version.isActive ? 'active' : ''} ${version.isHealthy ? '' : 'unavailable'}`} key={version.id} role={version.isHealthy ? 'button' : undefined} tabIndex={version.isHealthy ? 0 : -1} aria-disabled={!version.isHealthy} onClick={version.isHealthy ? () => openVersionDetails({ kind: 'Frozen', id: version.id }) : undefined} onKeyDown={version.isHealthy ? (event) => { if (event.key === 'Enter') openVersionDetails({ kind: 'Frozen', id: version.id }) } : undefined}><div className="version-list-main"><div className="version-badge">PZ</div><div className="version-identity"><VersionName name={version.name} /><div className="version-build">版本 {version.version} · Build {version.buildId ?? '—'}</div></div><div className="version-hover-details"><span>有效模组 <b>{version.effectiveModCount ?? '—'}</b></span><span>Workshop <b>{version.workshopProjectCount ?? '—'}</b></span><span>冻结时间 <b>{formatDate(version.created)}</b></span></div><button className={`tool-action ${version.isActive ? '' : 'primary'}`} disabled={version.isActive || !version.isHealthy || switchingId !== null} onClick={(event) => { event.stopPropagation(); void activateVersion(version.id) }}>{switchingId === version.id ? <LoaderCircle className="spin" /> : version.isActive ? <CheckCircle2 /> : <RefreshCw />}{version.isActive ? '当前' : '切换'}</button><ChevronRight className="version-open-icon" /></div></article>)}
-                {!versions.length && <div className="version-empty compact"><Boxes /><h2>还没有冻结版本</h2><p>进入“维护工具 → 版本控制”，从 Steam 原版创建第一个受管版本。</p><button className="primary-button" onClick={() => { setMaintenanceSection('version-control'); setActiveView('maintenance') }}><ArrowRight />开始版本控制</button></div>}
+                <article className={`version-card version-list-card ${steam?.detected ? '' : 'unavailable'} ${snapshot?.activeSource === 'Steam' ? 'active' : ''}`} role={steam?.detected ? 'button' : undefined} tabIndex={steam?.detected ? 0 : -1} aria-disabled={!steam?.detected} onClick={steam?.detected ? () => openVersionDetails({ kind: 'Steam' }) : undefined} onKeyDown={steam?.detected ? (event) => { if (event.key === 'Enter') openVersionDetails({ kind: 'Steam' }) } : undefined}><div className="version-list-main"><div className="version-badge">ST</div><div className="version-identity"><VersionName name="Steam 原版" /><div className="version-build">版本 {steam?.version ?? '未知'} · Build {steam?.buildId ?? '—'}</div></div><div className="version-hover-details"><span>来源 <b>Steam 自动登记</b></span><span>Workshop <b>{steam?.workshopProjectCount ?? '—'}</b></span><span>更新时间 <b>{formatDate(steam?.installedAt)}</b></span></div><button className={`tool-action ${snapshot?.activeSource === 'Steam' ? '' : 'primary'}`} disabled={!steam?.detected || snapshot?.activeSource === 'Steam' || switchingId !== null} onClick={(event) => { event.stopPropagation(); void activateSteam() }}>{switchingId === 'steam-original' ? <LoaderCircle className="spin" /> : snapshot?.activeSource === 'Steam' ? <CheckCircle2 /> : <RefreshCw />}{snapshot?.activeSource === 'Steam' ? '当前' : '切换'}</button><ChevronRight className="version-open-icon" /></div></article>
+                {versions.map((version) => <article className={`version-card version-list-card ${version.isActive ? 'active' : ''} ${version.isHealthy ? '' : 'unavailable'} ${version.shareInstallStatus === 'Quarantined' ? 'quarantined' : ''}`} key={version.id} role="button" tabIndex={0} onClick={() => openVersionDetails({ kind: 'Frozen', id: version.id })} onKeyDown={(event) => { if (event.key === 'Enter') openVersionDetails({ kind: 'Frozen', id: version.id }) }}><div className="version-list-main"><div className="version-badge">PZ</div><div className="version-identity"><VersionName name={version.name} /><div className="version-build">版本 {version.version} · Build {version.buildId ?? '—'}</div></div><div className="version-hover-details"><span>来源 <b>{version.shareInstallStatus === 'Verified' ? '共享包验证安装' : version.shareInstallStatus === 'Quarantined' ? '共享包隔离' : version.origin === 'External' ? '外部导入' : '管理器制作'}</b></span><span>有效模组 <b>{version.effectiveModCount ?? '—'}</b></span><span>登记时间 <b>{formatDate(version.registeredAt ?? version.created)}</b></span></div><button className={`tool-action ${version.isActive ? '' : 'primary'}`} disabled={version.isActive || !version.isHealthy || switchingId !== null} onClick={(event) => { event.stopPropagation(); void activateVersion(version.id) }}>{switchingId === version.id ? <LoaderCircle className="spin" /> : version.isActive ? <CheckCircle2 /> : <RefreshCw />}{version.shareInstallStatus === 'Quarantined' ? '已隔离' : version.isActive ? '当前' : '切换'}</button><ChevronRight className="version-open-icon" /></div></article>)}
+                {!versions.length && <div className="version-empty compact"><Boxes /><h2>还没有登记冻结版本</h2><p>可以从 Steam 创建第一个版本，或导入包含 metadata\\freeze.json 的外部冻结版本目录。</p><div className="version-empty-actions"><button className="primary-button" onClick={() => { setMaintenanceSection('version-control'); setActiveView('maintenance') }}><ArrowRight />开始版本控制</button><button className="secondary-button" onClick={() => void importExternalVersion()}><PackageOpen />导入外部版本</button></div></div>}
               </section>}
             </>
           ) : activeView === 'maintenance' ? (
             <>
               <section className="page-heading enter"><div><span className="eyebrow">VAULT OPERATIONS</span><h1>维护工具</h1><p>创建受管版本、检查兼容性或导入玩家共享包。</p></div><button className="secondary-button" onClick={() => void chooseRoot()}><FolderCog />{snapshot?.managerRoot ? '更换管理目录' : '选择管理目录'}</button></section>
-              <div className="maintenance-mode-tabs enter delay-1"><button className={maintenanceSection === 'version-control' ? 'active' : ''} onClick={() => setMaintenanceSection('version-control')}><Boxes />版本控制</button><button className={maintenanceSection === 'integrity' ? 'active' : ''} onClick={() => setMaintenanceSection('integrity')}><ClipboardCheck />完整性与兼容性</button><button className={maintenanceSection === 'share' ? 'active' : ''} onClick={() => setMaintenanceSection('share')}><PackageOpen />共享包导入</button></div>
+              <div className="maintenance-mode-tabs enter delay-1"><button className={maintenanceSection === 'version-control' ? 'active' : ''} onClick={() => setMaintenanceSection('version-control')}><Boxes />版本控制</button><button className={maintenanceSection === 'integrity' ? 'active' : ''} onClick={() => setMaintenanceSection('integrity')}><ClipboardCheck />完整性与兼容性</button><button className={maintenanceSection === 'share' ? 'active' : ''} onClick={() => setMaintenanceSection('share')}><PackageOpen />共享包</button></div>
               {maintenanceSection === 'version-control' ? <section className="migration-workflow enter delay-2">
                 <div className="workflow-header"><div><span className="eyebrow">NEW MANAGED VERSION</span><h2>创建受管版本</h2><p>明确选择来源、迁移模式和目标库。每次执行都会创建新的版本目录，不要求目标中预先存在文件。</p></div><div className={`workflow-ready ${migrationPreview?.canRun ? 'ready' : ''}`}><span />{migrationPreview?.canRun ? '可以执行' : '等待配置'}</div></div>
                 <div className="workflow-step"><div className="step-index">1</div><div className="step-body"><h3>选择迁移来源</h3><p>来源可以是实时 Steam 原版，也可以是版本库中的任意冻结版本。</p><div className="choice-grid source-choices"><button className={migrationSourceType === 'Steam' ? 'selected' : ''} onClick={() => { setMigrationSourceType('Steam'); setMigrationSourceId('') }}><div className="choice-icon steam"><span>ST</span></div><div><b>Steam 原版</b><small>{steam?.detected ? `${steam.version} · Build ${steam.buildId}` : steam?.issue ?? '正在检测'}</small></div>{migrationSourceType === 'Steam' && <CheckCircle2 />}</button><button className={migrationSourceType === 'Frozen' ? 'selected' : ''} disabled={!versions.length} onClick={() => { setMigrationSourceType('Frozen'); setMigrationSourceId((current) => current || versions[0]?.id || '') }}><div className="choice-icon"><Boxes /></div><div><b>已有冻结版本</b><small>{versions.length ? `${versions.length} 个版本可选` : '版本库为空'}</small></div>{migrationSourceType === 'Frozen' && <CheckCircle2 />}</button></div>{migrationSourceType === 'Frozen' && <label className="field-label">具体来源<select value={migrationSourceId} onChange={(event) => setMigrationSourceId(event.target.value)}><option value="">请选择冻结版本</option>{versions.map((version) => <option value={version.id} key={version.id}>{version.name} · {version.version} · Build {version.buildId ?? '—'}{version.isActive ? '（当前）' : ''}</option>)}</select></label>}</div></div>
                 <div className="workflow-step"><div className="step-index">2</div><div className="step-body"><h3>选择迁移模式</h3><p>完整复制可独立移动；快速薄版本依赖一个不可变冻结版，只新增当前版本真正需要的文件。</p><div className="choice-grid mode-choices"><button className={migrationMode === 'SafeCopy' ? 'selected' : ''} onClick={() => setMigrationMode('SafeCopy')}><div className="choice-icon"><Copy /></div><div><b>安全完整复制</b><small>游戏、MOD、配置和存档全部独立</small><em>可独立归档</em></div>{migrationMode === 'SafeCopy' && <CheckCircle2 />}</button><button className={migrationMode === 'FastLink' ? 'selected risk' : 'risk'} onClick={() => setMigrationMode('FastLink')}><div className="choice-icon amber"><Zap /></div><div><b>快速薄版本</b><small>引用游戏核心与启用 MOD，仅复制存档和配置</small><em>低空间占用</em></div>{migrationMode === 'FastLink' && <CheckCircle2 />}</button></div></div></div>
                 <div className="workflow-step"><div className="step-index">3</div><div className="step-body"><h3>命名并确认迁移位置</h3><p>名称是所有页面显示的主标题；游戏版本号和 Build 只作为技术信息。完成后会自动登记并切换到新版本。</p><div className="destination-row"><div><span>版本管理目录</span><code>{snapshot?.managerRoot ?? '尚未选择'}</code></div><button className="secondary-button" onClick={() => void chooseRoot()}><FolderCog />更换</button></div><label className="field-label">版本名称（必填）<input value={migrationLabel} onChange={(event) => setMigrationLabel(event.target.value)} placeholder="例如：长期生存主档、怀旧模组服" required /></label>{migrationPreview && <div className={`migration-preview ${migrationPreview.canRun ? 'ready' : 'blocked'}`}><div className="preview-path"><span>计划目标</span><code>{migrationPreview.targetPath ?? '尚未生成'}</code></div>{migrationPreview.analysis && <div className="migration-storage-analysis"><div><span>预计新增</span><b>{formatBytes(migrationPreview.analysis.estimatedWriteBytes)}</b><small>{migrationPreview.analysis.copiedMutableFiles} 个独立文件</small></div><div><span>引用游戏核心</span><b>{formatBytes(migrationPreview.analysis.sourceGameBytes)}</b><small>{migrationPreview.analysis.sourceGameFiles} 个文件</small></div><div><span>挂接启用 MOD</span><b>{formatBytes(migrationPreview.analysis.referencedModBytes)}</b><small>{migrationPreview.analysis.referencedModRoots} 个根目录</small></div><div className="saved"><span>预计节省</span><b>{formatBytes(migrationPreview.analysis.estimatedSavedBytes)}</b><small>相对完整复制</small></div></div>}{migrationPreview.steps.map((step, index) => <div className="preview-step" key={step}><span>{index + 1}</span>{step}</div>)}{migrationPreview.warnings.map((warning) => <div className="preview-warning" key={warning}><ShieldAlert />{warning}</div>)}</div>}<button className="migration-execute" disabled={!migrationPreview?.canRun || migrationBusy} onClick={() => void migrateVersion()}>{migrationBusy ? <LoaderCircle className="spin" /> : <ArrowRight />}开始创建受管版本</button></div></div>
-              </section> : maintenanceSection === 'integrity' ? <div className="compatibility-workspace enter delay-2"><section className="maintenance-grid"><article className="tool-card featured"><div className="tool-card-head"><div className="tool-icon"><ClipboardCheck /></div><span>SHA-256</span></div><h3>完整性校验</h3><p>重新计算当前冻结游戏和本地 MOD 的 SHA-256，并与创建时基线逐项比较。</p><button className="tool-action primary" disabled={!snapshot?.isHealthy || isBusy} onClick={() => void perform('Verify')}>{busyAction === 'Verify' ? <LoaderCircle className="spin" /> : <RefreshCw />}校验当前版本</button></article><article className="tool-card"><div className="tool-card-head"><div className="tool-icon blue"><ShieldCheck /></div><span>B42 规则引擎</span></div><h3>兼容性分析</h3><p>解析二进制版本身份、B42 版本目录、依赖图、存档/服务器清单与语义文件覆盖。</p><button className="tool-action" disabled={compatibilityLoading || (snapshot?.activeSource === 'Steam' ? !steam?.detected : !snapshot?.isHealthy)} onClick={() => void runCompatibilityAnalysis()}>{compatibilityLoading ? <LoaderCircle className="spin" /> : <Wrench />}{compatibilityLoading ? '正在扫描 MOD 与依赖' : '开始兼容性分析'}</button></article></section>{compatibilityLoading && <div className="compatibility-loading"><LoaderCircle className="spin" /><div><b>正在建立 MOD 关系数据库</b><span>扫描版本变体、依赖、存档、服务器和有效文件层</span></div></div>}{compatibilityReport && <CompatibilityResults report={compatibilityReport} />}</div> : <section className="share-import-panel enter delay-2"><div className="share-hero"><div className="share-icon"><PackageOpen /></div><div><span className="eyebrow">PZ SHARE PACKAGE</span><h2>共享包导入</h2><p>目标格式只保存版本清单、内容哈希和用户允许分享的资源，不包含个人存档、账号信息或运行时配置。</p></div></div><div className="share-principles"><div><CheckCircle2 /><span><b>可共享</b><small>游戏只读资源、已验证 MOD、内容哈希清单</small></span></div><div><ShieldAlert /><span><b>必须隔离</b><small>Saves、数据库、options.ini、日志、启用配置与 cache</small></span></div></div><button className="migration-execute" disabled><PackageOpen />共享包格式 v1 设计中</button><p className="share-footnote">下一阶段将先实现包清单验证与缺失内容分析，再开放正式导入，避免未经识别的文件直接进入版本库。</p></section>}
+              </section> : maintenanceSection === 'integrity' ? <div className="compatibility-workspace enter delay-2">
+                <div className="analysis-workspace-heading">
+                  <div><span className="eyebrow">VERSION READINESS</span><h2>完整性与兼容性</h2><p>先确认版本实体可信，再判断当前 MOD 组合能否协同运行。</p></div>
+                  <div className="analysis-responsibility-help">
+                    <button className={`analysis-help-button ${showAnalysisResponsibilities ? 'active' : ''}`} onClick={() => setShowAnalysisResponsibilities((value) => !value)} aria-expanded={showAnalysisResponsibilities}><CircleAlert />职责说明</button>
+                    {showAnalysisResponsibilities && <div className="analysis-help-popover" role="dialog" aria-label="完整性与兼容性职责说明"><button className="icon-button" onClick={() => setShowAnalysisResponsibilities(false)} aria-label="关闭职责说明"><X /></button><span className="eyebrow">ANALYSIS BOUNDARY</span><h3>两种分析回答不同问题</h3><div><ClipboardCheck /><p><b>完整性分析</b><span>文件是不是登记时的内容，基线、哈希、目录和快速版引用是否完整。</span></p></div><div><ShieldCheck /><p><b>兼容性分析</b><span>确定版本下，MOD 的版本变体、依赖、顺序和文件覆盖能否协同工作。</span></p></div><small>完整性通过不代表 MOD 兼容；兼容性通过也不能证明文件未损坏。</small></div>}
+                  </div>
+                </div>
+                <section className="maintenance-grid analysis-selectors" role="tablist" aria-label="分析类型">
+                  <article className={`tool-card analysis-selector ${analysisMode === 'integrity' ? 'selected featured' : ''}`} role="tab" tabIndex={0} aria-selected={analysisMode === 'integrity'} onClick={() => setAnalysisMode('integrity')} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') setAnalysisMode('integrity') }}><div className="tool-card-head"><div className="tool-icon"><ClipboardCheck /></div><span>SHA-256 · 文件结构</span></div><h3>完整性校验</h3><p>核对游戏、MOD、冻结基线和快速版引用，回答“这个版本实体是否仍然完整”。</p><button className={`tool-action ${analysisMode === 'integrity' ? 'primary' : ''}`} disabled={integrityLoading || compatibilityLoading || (snapshot?.activeSource === 'Steam' ? !steam?.detected : !snapshot?.isHealthy)} onClick={(event) => { event.stopPropagation(); void runIntegrityAnalysis() }}>{integrityLoading ? <LoaderCircle className="spin" /> : <RefreshCw />}{integrityLoading ? '正在核对文件与引用' : '开始完整性分析'}</button></article>
+                  <article className={`tool-card analysis-selector ${analysisMode === 'compatibility' ? 'selected featured' : ''}`} role="tab" tabIndex={0} aria-selected={analysisMode === 'compatibility'} onClick={() => setAnalysisMode('compatibility')} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') setAnalysisMode('compatibility') }}><div className="tool-card-head"><div className="tool-icon blue"><ShieldCheck /></div><span>B42 · MOD 关系</span></div><h3>兼容性分析</h3><p>解析版本变体、依赖图、存档/服务器清单与语义覆盖，回答“当前组合能否协同运行”。</p><button className={`tool-action ${analysisMode === 'compatibility' ? 'primary' : ''}`} disabled={compatibilityLoading || integrityLoading || (snapshot?.activeSource === 'Steam' ? !steam?.detected : !snapshot?.isHealthy)} onClick={(event) => { event.stopPropagation(); void runCompatibilityAnalysis() }}>{compatibilityLoading ? <LoaderCircle className="spin" /> : <Wrench />}{compatibilityLoading ? '正在扫描 MOD 与依赖' : '开始兼容性分析'}</button></article>
+                </section>
+                <section className={`analysis-result-workspace ${analysisMode}`} role="tabpanel">
+                  <div className="analysis-result-heading"><div className={`tool-icon ${analysisMode === 'compatibility' ? 'blue' : ''}`}>{analysisMode === 'integrity' ? <ClipboardCheck /> : <ShieldCheck />}</div><div><span>{analysisMode === 'integrity' ? 'INTEGRITY WORKSPACE' : 'COMPATIBILITY WORKSPACE'}</span><h3>{analysisMode === 'integrity' ? '完整性分析结果' : '兼容性分析结果'}</h3></div></div>
+                  {analysisMode === 'integrity' ? <>{integrityLoading ? <div className="compatibility-loading"><LoaderCircle className="spin" /><div><b>正在核对版本实体</b><span>读取基线清单、计算 SHA-256 并验证快速版引用</span></div></div> : integrityReport ? <IntegrityResults report={integrityReport} /> : <div className="analysis-empty"><ClipboardCheck /><b>尚未分析当前版本的完整性</b><span>运行后，这里只显示文件、基线、目录和引用关系的证据。</span><button className="secondary-button" disabled={snapshot?.activeSource === 'Steam' ? !steam?.detected : !snapshot?.isHealthy} onClick={() => void runIntegrityAnalysis()}><RefreshCw />开始完整性分析</button></div>}</> : <>{compatibilityLoading ? <div className="compatibility-loading"><LoaderCircle className="spin" /><div><b>正在建立 MOD 关系数据库</b><span>扫描版本变体、依赖、存档、服务器和有效文件层</span></div></div> : compatibilityReport ? <CompatibilityResults report={compatibilityReport} /> : <div className="analysis-empty"><ShieldCheck /><b>尚未分析当前 MOD 组合</b><span>运行后，这里只显示版本规则、依赖、顺序、配置和文件覆盖结论。</span><button className="secondary-button" disabled={snapshot?.activeSource === 'Steam' ? !steam?.detected : !snapshot?.isHealthy} onClick={() => void runCompatibilityAnalysis()}><Wrench />开始兼容性分析</button></div>}</>}
+                </section>
+              </div> : <section className="share-import-panel enter delay-2">
+                <div className="share-hero"><div className="share-icon"><PackageOpen /></div><div><span className="eyebrow">PZ SHARE PACKAGE · V1</span><h2>共享清单制作与接收</h2><p>共享的是可审计的版本身份、启用清单和内容指纹；游戏本体、普通 Workshop MOD、本地 MOD 与个人数据都不会进入文件。</p></div></div>
+                <div className="share-principles"><div><CheckCircle2 /><span><b>允许进入 v1</b><small>AppID、游戏身份、Workshop ID、Mod ID、版本变体、加载顺序、依赖关系和 SHA-256 内容指纹</small></span></div><div><ShieldAlert /><span><b>明确排除</b><small>游戏文件、MOD 文件、Saves、数据库、账号信息、日志、cache、绝对路径和可执行脚本</small></span></div></div>
+                <div className="share-actions-grid">
+                  <article className="share-action-card"><div className="share-action-heading"><Archive /><div><span>CREATE</span><h3>制作共享清单</h3></div></div><p>以当前版本的唯一存档或服务器启用上下文为准。制作前自动执行完整性、兼容性和逐 MOD 内容指纹分析。</p><button className="secondary-button" disabled={shareBusy !== null || (snapshot?.activeSource === 'Steam' ? !steam?.detected : !snapshot?.isHealthy)} onClick={() => void createShareManifest()}>{shareBusy === 'create' ? <LoaderCircle className="spin" /> : <Archive />}{shareBusy === 'create' ? '正在分析并计算指纹' : '制作 .pzshare'}</button></article>
+                  <article className="share-action-card"><div className="share-action-heading"><PackageOpen /><div><span>RECEIVE</span><h3>接收并隔离验证</h3></div></div><p>先验证格式与摘要，再对比本机游戏身份和每个 MOD 的实际字节；验证期间不会把文件写入版本库。</p><button className="secondary-button" disabled={shareBusy !== null} onClick={() => void inspectSharedManifest()}>{shareBusy === 'inspect' ? <LoaderCircle className="spin" /> : <PackageOpen />}{shareBusy === 'inspect' ? '正在隔离验证' : '选择共享包'}</button></article>
+                </div>
+                {shareInspection && <div className={`share-inspection ${shareInspection.canInstall ? 'ready' : 'blocked'}`}>
+                  <div className="share-inspection-head"><div><span className="eyebrow">VALIDATION RESULT</span><h3>{shareInspection.title ?? '无法识别的共享包'}</h3><p>{shareInspection.message}</p></div><div className={`workflow-ready ${shareInspection.canInstall ? 'ready' : ''}`}><span />{shareInspection.canInstall ? '可以安装' : shareInspection.valid ? '条件不足' : '无效文件'}</div></div>
+                  <div className="share-facts"><div><span>游戏版本</span><b>{shareInspection.gameVersion ?? '—'}</b></div><div><span>Build</span><b>{shareInspection.buildId ?? '—'}</b></div><div><span>启用 MOD</span><b>{shareInspection.modCount}</b></div><div><span>Workshop 项目</span><b>{shareInspection.workshopCount}</b></div><div><span>权利模式</span><b>{shareInspection.rights === 'reference-only' ? '零嵌入引用' : '未知'}</b></div><div><span>身份签名</span><b>{shareInspection.trust === 'unsigned' ? 'v1 未签名' : '无效'}</b></div></div>
+                  {shareInspection.digest && <div className="share-digest"><span>包内容 SHA-256</span><code>{shareInspection.digest}</code></div>}
+                  <div className="share-findings">{shareInspection.findings.map((finding, index) => <div className={finding.severity} key={`${finding.title}-${index}`}>{finding.severity === 'pass' ? <CheckCircle2 /> : <ShieldAlert />}<span><b>{finding.title}</b><small>{finding.detail}</small></span></div>)}</div>
+                  <button className="migration-execute" disabled={!shareInspection.canInstall || !shareInspection.filePath || shareBusy !== null} onClick={() => void installSharedManifest()}>{shareBusy === 'install' ? <LoaderCircle className="spin" /> : <ArrowRight />}{shareBusy === 'install' ? '正在复制并执行安装后复核' : '安装为新的受管版本'}</button>
+                </div>}
+                <p className="share-footnote">v1 的“通过”表示当前机器找到了相同游戏身份和相同字节的 MOD；它不证明制作者身份，也不会把“免费订阅”误判成允许重新分发。</p>
+              </section>}
             </>
           ) : activeView === 'help' ? (
             <>
@@ -704,7 +929,7 @@ export const App = (): React.JSX.Element => {
       <div className={`drawer-backdrop ${isDrawerOpen ? 'open' : ''}`} onMouseDown={(event) => { if (event.currentTarget === event.target) { setDrawerOpen(false); setDetailSelection(null) } }}>
         <aside className="environment-drawer" role="dialog" aria-modal="true" aria-label="版本详情">
           <header className="drawer-header"><div><span className="eyebrow">VERSION DETAILS</span><h2>版本详情</h2></div><button className="icon-button" onClick={() => { setDrawerOpen(false); setDetailSelection(null) }} aria-label="关闭详情"><X /></button></header>
-          <div className="drawer-scroll"><div className={`drawer-health ${detailHealthy ? 'healthy' : 'warning'}`}><ShieldCheck /><div><b>{detailHealthy ? '版本检查通过' : '版本不可用'}</b><span>{detailIsSteam ? steam?.issue ?? 'Steam 原版、Workshop 与用户目录已识别。' : detailHealthy ? '游戏、缓存和版本路径均可访问。' : '该冻结版本缺少必要的游戏或缓存目录。'}</span></div></div><div className="drawer-version"><div className={`drawer-monogram ${detailIsSteam ? 'steam' : ''}`}>{detailIsSteam ? 'ST' : 'PZ'}</div><div><span>{detailIsSteam ? 'STEAM MANAGED' : 'FROZEN BUILD'}</span><h3>{detailName}</h3><small>版本 {detailTechnicalVersion ?? '未知'} · Build {detailBuildId ?? '—'}</small></div></div><section className="drawer-section"><h4>版本摘要</h4><dl><div><dt>有效模组</dt><dd>{detailIsSteam ? '由 Steam 管理' : detailFrozen?.effectiveModCount ?? '—'}</dd></div><div><dt>Workshop 项目</dt><dd>{detailIsSteam ? steam?.workshopProjectCount ?? '—' : detailFrozen?.workshopProjectCount ?? '—'}</dd></div><div><dt>{detailIsSteam ? '清单更新' : '冻结时间'}</dt><dd>{formatDate(detailIsSteam ? steam?.installedAt : detailFrozen?.created)}</dd></div></dl></section><section className="drawer-section"><h4>文件位置</h4>{detailIsSteam ? <><div className="path-item"><span>Steam 游戏</span><code>{compactPath(steam?.gamePath)}</code></div><div className="path-item"><span>Workshop</span><code>{compactPath(steam?.workshopPath)}</code></div><div className="path-item"><span>用户数据</span><code>{compactPath(steam?.cachePath)}</code></div></> : <><div className="path-item"><span>版本目录</span><code>{compactPath(detailFrozen?.freezeRoot)}</code></div><div className="path-item"><span>{detailFrozen?.storageMode === 'ThinReference' ? '引用游戏' : '冻结游戏'}</span><code>{compactPath(detailFrozen?.gamePath)}</code></div><div className="path-item"><span>独立缓存</span><code>{compactPath(detailFrozen?.cachePath)}</code></div><div className="path-item"><span>备份目录</span><code>{compactPath(detailFrozen?.backupPath)}</code></div></>}</section></div>
+          <div className="drawer-scroll"><div className={`drawer-health ${detailHealthy ? 'healthy' : 'warning'}`}><ShieldCheck /><div><b>{detailHealthTitle}</b><span>{detailHealthText}</span></div></div><div className="drawer-version"><div className={`drawer-monogram ${detailIsSteam ? 'steam' : ''}`}>{detailIsSteam ? 'ST' : 'PZ'}</div><div><span>{detailBuildKind}</span><h3>{detailName}</h3><small>版本 {detailTechnicalVersion ?? '未知'} · Build {detailBuildId ?? '—'}</small></div></div><section className="drawer-section"><h4>版本摘要</h4><dl><div><dt>有效模组</dt><dd>{detailIsSteam ? '由 Steam 管理' : detailFrozen?.effectiveModCount ?? '—'}</dd></div><div><dt>Workshop 项目</dt><dd>{detailIsSteam ? steam?.workshopProjectCount ?? '—' : detailFrozen?.workshopProjectCount ?? '—'}</dd></div><div><dt>{detailIsSteam ? '清单更新' : '冻结时间'}</dt><dd>{formatDate(detailIsSteam ? steam?.installedAt : detailFrozen?.created)}</dd></div></dl></section><section className="drawer-section"><h4>文件位置</h4>{detailIsSteam ? <><div className="path-item"><span>Steam 游戏</span><code>{compactPath(steam?.gamePath)}</code></div><div className="path-item"><span>Workshop</span><code>{compactPath(steam?.workshopPath)}</code></div><div className="path-item"><span>用户数据</span><code>{compactPath(steam?.cachePath)}</code></div></> : <><div className="path-item"><span>版本目录</span><code>{compactPath(detailFrozen?.freezeRoot)}</code></div><div className="path-item"><span>{detailFrozen?.storageMode === 'ThinReference' ? '引用游戏' : '冻结游戏'}</span><code>{compactPath(detailFrozen?.gamePath)}</code></div><div className="path-item"><span>独立缓存</span><code>{compactPath(detailFrozen?.cachePath)}</code></div><div className="path-item"><span>备份目录</span><code>{compactPath(detailFrozen?.backupPath)}</code></div></>}</section></div>
           <footer className="drawer-footer"><button className="secondary-button" disabled={!detailHealthy} onClick={openCurrentVersionPath}><FolderOpen />打开版本目录</button><button className="launch-button compact" disabled={!detailHealthy || isBusy || switchingId !== null} onClick={() => { if (detailIsCurrent) void perform('Launch'); else if (detailIsSteam) void activateSteam(); else if (detailFrozen) void activateVersion(detailFrozen.id) }}>{detailIsCurrent ? <Play fill="currentColor" /> : <RefreshCw />}{detailIsCurrent ? '启动当前版本' : '切换到此版本'}</button></footer>
         </aside>
       </div>
